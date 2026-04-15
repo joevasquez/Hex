@@ -59,6 +59,9 @@ struct SettingsFeature {
     var modelDownload = ModelDownloadFeature.State()
     var shouldFlashModelSection = false
 
+    // AI Processing
+    var loadedAPIKey: String = ""
+    var apiKeySaved: Bool = false
   }
 
   enum Action: BindableAction {
@@ -113,6 +116,21 @@ struct SettingsFeature {
     case updateWordRemapping(WordRemapping)
     case removeWordRemapping(UUID)
     case setRemappingScratchpadFocused(Bool)
+
+    // AI Processing
+    case setAIProcessingEnabled(Bool)
+    case setAIProcessingMode(AIProcessingMode)
+    case setAIProvider(AIProvider)
+    case setContextAwareAutoMode(Bool)
+    case setVoiceCommandsEnabled(Bool)
+    case addAppModeRule
+    case updateAppModeRule(AppModeRule)
+    case removeAppModeRule(UUID)
+    case saveAPIKey(String, forProvider: AIProvider)
+    case loadAPIKey(AIProvider)
+    case apiKeyLoaded(String)
+    case setContextEnrichmentEnabled(Bool)
+    case setLiveTranscriptEnabled(Bool)
   }
 
   @Dependency(\.keyEventMonitor) var keyEventMonitor
@@ -122,6 +140,7 @@ struct SettingsFeature {
   @Dependency(\.permissions) var permissions
   @Dependency(\.soundEffects) var soundEffects
   @Dependency(\.transcriptPersistence) var transcriptPersistence
+  @Dependency(\.keychain) var keychain
 
   private func deleteAudioEffect(for transcripts: [Transcript]) -> Effect<Action> {
     .run { [transcriptPersistence] _ in
@@ -582,6 +601,88 @@ struct SettingsFeature {
 
       case let .setWordRemovalsEnabled(enabled):
         state.$hexSettings.withLock { $0.wordRemovalsEnabled = enabled }
+        return .none
+
+      // AI Processing
+      case let .setAIProcessingEnabled(enabled):
+        state.$hexSettings.withLock { $0.aiProcessingEnabled = enabled }
+        return .none
+
+      case let .setAIProcessingMode(mode):
+        state.$hexSettings.withLock { $0.aiProcessingMode = mode }
+        return .none
+
+      case let .setAIProvider(provider):
+        state.$hexSettings.withLock { $0.aiProvider = provider }
+        return .none
+
+      case let .setContextAwareAutoMode(enabled):
+        state.$hexSettings.withLock { $0.contextAwareAutoMode = enabled }
+        return .none
+
+      case let .setVoiceCommandsEnabled(enabled):
+        state.$hexSettings.withLock { $0.voiceCommandsEnabled = enabled }
+        return .none
+
+      case .addAppModeRule:
+        state.$hexSettings.withLock {
+          $0.appModeRules.append(.init(bundleIdentifier: "", appName: "", mode: .clean))
+        }
+        return .none
+
+      case let .updateAppModeRule(rule):
+        state.$hexSettings.withLock {
+          guard let index = $0.appModeRules.firstIndex(where: { $0.id == rule.id }) else { return }
+          $0.appModeRules[index] = rule
+        }
+        return .none
+
+      case let .removeAppModeRule(id):
+        state.$hexSettings.withLock {
+          $0.appModeRules.removeAll { $0.id == id }
+        }
+        return .none
+
+      case let .saveAPIKey(key, forProvider: provider):
+        state.apiKeySaved = false
+        return .run { [keychain] send in
+          let keychainKey: String
+          switch provider {
+          case .openAI: keychainKey = KeychainKey.openAIAPIKey
+          case .anthropic: keychainKey = KeychainKey.anthropicAPIKey
+          }
+          if key.isEmpty {
+            await keychain.delete(keychainKey)
+          } else {
+            try? await keychain.save(keychainKey, key)
+          }
+          // Reload to confirm it saved
+          let saved = await keychain.read(keychainKey)
+          await send(.apiKeyLoaded(saved ?? ""))
+        }
+
+      case let .loadAPIKey(provider):
+        return .run { [keychain] send in
+          let keychainKey: String
+          switch provider {
+          case .openAI: keychainKey = KeychainKey.openAIAPIKey
+          case .anthropic: keychainKey = KeychainKey.anthropicAPIKey
+          }
+          let value = await keychain.read(keychainKey) ?? ""
+          await send(.apiKeyLoaded(value))
+        }
+
+      case let .apiKeyLoaded(key):
+        state.loadedAPIKey = key
+        state.apiKeySaved = !key.isEmpty
+        return .none
+
+      case let .setContextEnrichmentEnabled(enabled):
+        state.$hexSettings.withLock { $0.contextEnrichmentEnabled = enabled }
+        return .none
+
+      case let .setLiveTranscriptEnabled(enabled):
+        state.$hexSettings.withLock { $0.liveTranscriptEnabled = enabled }
         return .none
 
       }

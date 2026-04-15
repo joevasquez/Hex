@@ -48,6 +48,16 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var wordRemovals: [WordRemoval]
 	public var wordRemappings: [WordRemapping]
 
+	// AI Processing
+	public var aiProcessingEnabled: Bool
+	public var aiProcessingMode: AIProcessingMode
+	public var aiProvider: AIProvider
+	public var contextAwareAutoMode: Bool
+	public var appModeRules: [AppModeRule]
+	public var voiceCommandsEnabled: Bool
+	public var contextEnrichmentEnabled: Bool
+	public var liveTranscriptEnabled: Bool
+
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
 			useDoubleTapOnly = false
@@ -78,7 +88,15 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		hasCompletedStorageMigration: Bool = false,
 		wordRemovalsEnabled: Bool = false,
 		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
-		wordRemappings: [WordRemapping] = []
+		wordRemappings: [WordRemapping] = [],
+		aiProcessingEnabled: Bool = false,
+		aiProcessingMode: AIProcessingMode = .off,
+		aiProvider: AIProvider = .openAI,
+		contextAwareAutoMode: Bool = false,
+		appModeRules: [AppModeRule] = [],
+		voiceCommandsEnabled: Bool = false,
+		contextEnrichmentEnabled: Bool = false,
+		liveTranscriptEnabled: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -104,6 +122,14 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.wordRemovalsEnabled = wordRemovalsEnabled
 		self.wordRemovals = wordRemovals
 		self.wordRemappings = wordRemappings
+		self.aiProcessingEnabled = aiProcessingEnabled
+		self.aiProcessingMode = aiProcessingMode
+		self.aiProvider = aiProvider
+		self.contextAwareAutoMode = contextAwareAutoMode
+		self.appModeRules = appModeRules
+		self.voiceCommandsEnabled = voiceCommandsEnabled
+		self.contextEnrichmentEnabled = contextEnrichmentEnabled
+		self.liveTranscriptEnabled = liveTranscriptEnabled
 		normalizeDoubleTapSettings()
 	}
 
@@ -152,6 +178,14 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case wordRemovalsEnabled
 	case wordRemovals
 	case wordRemappings
+	case aiProcessingEnabled
+	case aiProcessingMode
+	case aiProvider
+	case contextAwareAutoMode
+	case appModeRules
+	case voiceCommandsEnabled
+	case contextEnrichmentEnabled
+	case liveTranscriptEnabled
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -284,6 +318,14 @@ private enum HexSettingsSchema {
 			.wordRemappings,
 			keyPath: \.wordRemappings,
 			default: defaults.wordRemappings
-		).eraseToAny()
+		).eraseToAny(),
+		SettingsField(.aiProcessingEnabled, keyPath: \.aiProcessingEnabled, default: defaults.aiProcessingEnabled).eraseToAny(),
+		SettingsField(.aiProcessingMode, keyPath: \.aiProcessingMode, default: defaults.aiProcessingMode).eraseToAny(),
+		SettingsField(.aiProvider, keyPath: \.aiProvider, default: defaults.aiProvider).eraseToAny(),
+		SettingsField(.contextAwareAutoMode, keyPath: \.contextAwareAutoMode, default: defaults.contextAwareAutoMode).eraseToAny(),
+		SettingsField(.appModeRules, keyPath: \.appModeRules, default: defaults.appModeRules).eraseToAny(),
+		SettingsField(.voiceCommandsEnabled, keyPath: \.voiceCommandsEnabled, default: defaults.voiceCommandsEnabled).eraseToAny(),
+		SettingsField(.contextEnrichmentEnabled, keyPath: \.contextEnrichmentEnabled, default: defaults.contextEnrichmentEnabled).eraseToAny(),
+		SettingsField(.liveTranscriptEnabled, keyPath: \.liveTranscriptEnabled, default: defaults.liveTranscriptEnabled).eraseToAny(),
 	]
 }

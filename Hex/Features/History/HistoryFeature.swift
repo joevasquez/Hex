@@ -5,6 +5,7 @@ import Dependencies
 import HexCore
 import Inject
 import SwiftUI
+import WhisperKit
 
 private let historyLogger = HexLog.history
 
@@ -92,6 +93,11 @@ struct HistoryFeature {
 		var audioPlayer: AVAudioPlayer?
 		var audioPlayerController: AudioPlayerController?
 
+		// File transcription
+		var isTranscribingFile: Bool = false
+		var fileTranscriptionResult: String?
+		var fileTranscriptionError: String?
+
 		mutating func stopAudioPlayback() {
 			audioPlayerController?.stop()
 			audioPlayer = nil
@@ -109,10 +115,17 @@ struct HistoryFeature {
 		case confirmDeleteAll
 		case playbackFinished
 		case navigateToSettings
+
+		// File transcription
+		case transcribeFile(URL)
+		case fileTranscriptionCompleted(String)
+		case fileTranscriptionFailed(String)
+		case clearFileTranscription
 	}
 
 	@Dependency(\.pasteboard) var pasteboard
 	@Dependency(\.transcriptPersistence) var transcriptPersistence
+	@Dependency(\.transcription) var transcription
 
 	private func deleteAudioEffect(for transcripts: [Transcript]) -> Effect<Action> {
 		.run { [transcriptPersistence] _ in
@@ -207,6 +220,47 @@ struct HistoryFeature {
 				
 			case .navigateToSettings:
 				// This will be handled by the parent reducer
+				return .none
+
+			// File transcription
+			case let .transcribeFile(url):
+				state.isTranscribingFile = true
+				state.fileTranscriptionResult = nil
+				state.fileTranscriptionError = nil
+				@Shared(.hexSettings) var hexSettings: HexSettings
+				let model = hexSettings.selectedModel
+				let language = hexSettings.outputLanguage
+
+				return .run { send in
+					do {
+						let options = DecodingOptions(
+							language: language,
+							detectLanguage: language == nil,
+							chunkingStrategy: .vad
+						)
+						let result = try await transcription.transcribe(url, model, options) { _ in }
+						await send(.fileTranscriptionCompleted(result))
+					} catch {
+						historyLogger.error("File transcription failed: \(error.localizedDescription)")
+						await send(.fileTranscriptionFailed(error.localizedDescription))
+					}
+				}
+
+			case let .fileTranscriptionCompleted(text):
+				state.isTranscribingFile = false
+				state.fileTranscriptionResult = text
+				return .run { [pasteboard] _ in
+					await pasteboard.copy(text)
+				}
+
+			case let .fileTranscriptionFailed(error):
+				state.isTranscribingFile = false
+				state.fileTranscriptionError = error
+				return .none
+
+			case .clearFileTranscription:
+				state.fileTranscriptionResult = nil
+				state.fileTranscriptionError = nil
 				return .none
 			}
 		}
@@ -341,55 +395,144 @@ struct HistoryView: View {
 	@ObserveInjection var inject
 	let store: StoreOf<HistoryFeature>
 	@State private var showingDeleteConfirmation = false
+	@State private var isDropTargeted = false
 	@Shared(.hexSettings) var hexSettings: HexSettings
 
 	var body: some View {
       Group {
-        if !hexSettings.saveTranscriptionHistory {
-          ContentUnavailableView {
-            Label("History Disabled", systemImage: "clock.arrow.circlepath")
-          } description: {
-            Text("Transcription history is currently disabled.")
-          } actions: {
-            Button("Enable in Settings") {
-              store.send(.navigateToSettings)
-            }
-          }
-        } else if store.transcriptionHistory.history.isEmpty {
-          ContentUnavailableView {
-            Label("No Transcriptions", systemImage: "text.bubble")
-          } description: {
-            Text("Your transcription history will appear here.")
-          }
-        } else {
-          ScrollView {
-            LazyVStack(spacing: 12) {
-              ForEach(store.transcriptionHistory.history) { transcript in
-                TranscriptView(
-                  transcript: transcript,
-                  isPlaying: store.playingTranscriptID == transcript.id,
-                  onPlay: { store.send(.playTranscript(transcript.id)) },
-                  onCopy: { store.send(.copyToClipboard(transcript.text)) },
-                  onDelete: { store.send(.deleteTranscript(transcript.id)) }
-                )
+        VStack(spacing: 0) {
+          // File transcription drop zone
+          FileDropZoneView(store: store, isDropTargeted: $isDropTargeted)
+
+          if !hexSettings.saveTranscriptionHistory {
+            ContentUnavailableView {
+              Label("History Disabled", systemImage: "clock.arrow.circlepath")
+            } description: {
+              Text("Transcription history is currently disabled.")
+            } actions: {
+              Button("Enable in Settings") {
+                store.send(.navigateToSettings)
               }
             }
-            .padding()
-          }
-          .toolbar {
-            Button(role: .destructive, action: { showingDeleteConfirmation = true }) {
-              Label("Delete All", systemImage: "trash")
+          } else if store.transcriptionHistory.history.isEmpty {
+            ContentUnavailableView {
+              Label("No Transcriptions", systemImage: "text.bubble")
+            } description: {
+              Text("Your transcription history will appear here.")
             }
-          }
-          .alert("Delete All Transcripts", isPresented: $showingDeleteConfirmation) {
-            Button("Delete All", role: .destructive) {
-              store.send(.confirmDeleteAll)
+          } else {
+            ScrollView {
+              LazyVStack(spacing: 12) {
+                ForEach(store.transcriptionHistory.history) { transcript in
+                  TranscriptView(
+                    transcript: transcript,
+                    isPlaying: store.playingTranscriptID == transcript.id,
+                    onPlay: { store.send(.playTranscript(transcript.id)) },
+                    onCopy: { store.send(.copyToClipboard(transcript.text)) },
+                    onDelete: { store.send(.deleteTranscript(transcript.id)) }
+                  )
+                }
+              }
+              .padding()
             }
-            Button("Cancel", role: .cancel) {}
-          } message: {
-            Text("Are you sure you want to delete all transcripts? This action cannot be undone.")
+            .toolbar {
+              Button(role: .destructive, action: { showingDeleteConfirmation = true }) {
+                Label("Delete All", systemImage: "trash")
+              }
+            }
+            .alert("Delete All Transcripts", isPresented: $showingDeleteConfirmation) {
+              Button("Delete All", role: .destructive) {
+                store.send(.confirmDeleteAll)
+              }
+              Button("Cancel", role: .cancel) {}
+            } message: {
+              Text("Are you sure you want to delete all transcripts? This action cannot be undone.")
+            }
           }
         }
-      }.enableInjection()
+      }
+      .onDrop(of: [.audio, .movie], isTargeted: $isDropTargeted) { providers in
+        handleDrop(providers)
+      }
+      .enableInjection()
+	}
+
+	private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+		for provider in providers {
+			provider.loadItem(forTypeIdentifier: "public.audio", options: nil) { item, _ in
+				if let url = item as? URL {
+					Task { @MainActor in store.send(.transcribeFile(url)) }
+				} else if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
+					Task { @MainActor in store.send(.transcribeFile(url)) }
+				}
+			}
+			provider.loadItem(forTypeIdentifier: "public.movie", options: nil) { item, _ in
+				if let url = item as? URL {
+					Task { @MainActor in store.send(.transcribeFile(url)) }
+				}
+			}
+		}
+		return true
+	}
+}
+
+struct FileDropZoneView: View {
+	let store: StoreOf<HistoryFeature>
+	@Binding var isDropTargeted: Bool
+
+	var body: some View {
+		VStack(spacing: 8) {
+			if store.isTranscribingFile {
+				ProgressView()
+					.controlSize(.small)
+				Text("Transcribing file...")
+					.font(.caption)
+					.foregroundStyle(.secondary)
+			} else if let result = store.fileTranscriptionResult {
+				VStack(spacing: 6) {
+					Text(result)
+						.font(.body)
+						.lineLimit(5)
+						.textSelection(.enabled)
+					HStack {
+						Text("Copied to clipboard")
+							.font(.caption)
+							.foregroundStyle(.green)
+						Spacer()
+						Button("Clear") {
+							store.send(.clearFileTranscription)
+						}
+						.buttonStyle(.borderless)
+						.font(.caption)
+					}
+				}
+			} else if let error = store.fileTranscriptionError {
+				Label(error, systemImage: "exclamationmark.triangle")
+					.font(.caption)
+					.foregroundStyle(.red)
+			} else {
+				Image(systemName: "waveform.badge.plus")
+					.font(.title2)
+					.foregroundStyle(isDropTargeted ? .blue : .secondary)
+				Text("Drop audio or video file to transcribe")
+					.font(.caption)
+					.foregroundStyle(.secondary)
+			}
+		}
+		.frame(maxWidth: .infinity)
+		.padding(12)
+		.background(
+			RoundedRectangle(cornerRadius: 8)
+				.strokeBorder(
+					isDropTargeted ? Color.blue : Color.secondary.opacity(0.3),
+					style: StrokeStyle(lineWidth: 1.5, dash: [6, 3])
+				)
+				.background(
+					RoundedRectangle(cornerRadius: 8)
+						.fill(isDropTargeted ? Color.blue.opacity(0.05) : Color.clear)
+				)
+		)
+		.padding(.horizontal)
+		.padding(.top, 8)
 	}
 }

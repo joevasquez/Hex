@@ -34,6 +34,7 @@ struct RecordingClient {
   var getDefaultInputDeviceName: @Sendable () async -> String? = { nil }
   var warmUpRecorder: @Sendable () async -> Void = {}
   var cleanup: @Sendable () async -> Void = {}
+  var snapshotCurrentRecording: @Sendable () async -> URL? = { nil }
 }
 
 extension RecordingClient: DependencyKey {
@@ -50,7 +51,8 @@ extension RecordingClient: DependencyKey {
       getAvailableInputDevices: { await live.getAvailableInputDevices() },
       getDefaultInputDeviceName: { await live.getDefaultInputDeviceName() },
       warmUpRecorder: { await live.warmUpRecorder() },
-      cleanup: { await live.cleanup() }
+      cleanup: { await live.cleanup() },
+      snapshotCurrentRecording: { await live.snapshotCurrentRecording() }
     )
   }
 }
@@ -1460,6 +1462,53 @@ actor RecordingClientLive {
     stopCaptureController(reason: "cleanup")
     releaseRecorder(reason: "cleanup")
     recordingLogger.notice("RecordingClient cleaned up")
+  }
+
+  /// Copy the in-progress recording to a temporary file for live transcription.
+  /// Returns nil if no recording is active.
+  func snapshotCurrentRecording() -> URL? {
+    guard let session = activeRecordingSession else {
+      recordingLogger.debug("snapshotCurrentRecording: no active session")
+      return nil
+    }
+
+    let sourceURL: URL
+    switch session.backend {
+    case .captureEngine:
+      guard let captureURL = captureController.activeRecordingURL else {
+        recordingLogger.debug("snapshotCurrentRecording: capture engine has no active URL")
+        return nil
+      }
+      sourceURL = captureURL
+    case .recorderFallback:
+      sourceURL = recordingURL
+    }
+
+    let snapshotURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("hex-snapshot-\(UUID().uuidString).wav")
+
+    do {
+      // Read the bytes rather than copyItem to avoid file lock conflicts
+      var data = try Data(contentsOf: sourceURL)
+      guard data.count > 44 else {  // WAV header is 44 bytes; skip empty files
+        recordingLogger.debug("snapshotCurrentRecording: file too small (\(data.count) bytes)")
+        return nil
+      }
+      // Patch the WAV header — the in-progress file has placeholder size fields.
+      // WAV format: bytes 4-7 = file size - 8, bytes 40-43 = data chunk size
+      let fileSize = UInt32(data.count - 8)
+      let dataSize = UInt32(data.count - 44)
+      data.replaceSubrange(4..<8, with: withUnsafeBytes(of: fileSize.littleEndian) { Data($0) })
+      data.replaceSubrange(40..<44, with: withUnsafeBytes(of: dataSize.littleEndian) { Data($0) })
+
+      try data.write(to: snapshotURL)
+      let durationSecs = Double(dataSize) / (16000.0 * 4.0)  // 16kHz, 32-bit float
+      recordingLogger.debug("snapshotCurrentRecording: created snapshot (\(data.count) bytes, ~\(String(format: "%.1f", durationSecs))s)")
+      return snapshotURL
+    } catch {
+      recordingLogger.warning("Failed to snapshot recording: \(error.localizedDescription)")
+      return nil
+    }
   }
 }
 

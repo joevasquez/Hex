@@ -113,6 +113,11 @@ final class SuperFastCaptureController {
   private var engine: AVAudioEngine?
   private var converter: AVAudioConverter?
   private var activeRecording: ActiveRecording?
+
+  /// URL of the in-progress recording file, if any.
+  var activeRecordingURL: URL? {
+    processingQueue.sync { activeRecording?.url }
+  }
   private var keepWarmBuffer = false
   private var lastProcessedBufferAt: Date?
   private var recentCallbackIntervals: [TimeInterval] = []

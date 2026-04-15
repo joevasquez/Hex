@@ -22,11 +22,14 @@ struct TranscriptionFeature {
     var isRecording: Bool = false
     var isTranscribing: Bool = false
     var isPrewarming: Bool = false
+    var isAIProcessing: Bool = false
     var error: String?
     var recordingStartTime: Date?
     var meter: Meter = .init(averagePower: 0, peakPower: 0)
     var sourceAppBundleID: String?
     var sourceAppName: String?
+    var capturedContext: AppContext?
+    var partialTranscript: String = ""
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -52,6 +55,9 @@ struct TranscriptionFeature {
     // Transcription result flow
     case transcriptionResult(String, URL)
     case transcriptionError(Error, URL?)
+    case aiProcessingFinished
+    case contextCaptured(AppContext)
+    case partialTranscriptUpdated(String)
 
     // Model availability
     case modelMissing
@@ -61,6 +67,7 @@ struct TranscriptionFeature {
     case metering
     case recordingCleanup
     case transcription
+    case liveTranscription
   }
 
   @Dependency(\.transcription) var transcription
@@ -71,6 +78,8 @@ struct TranscriptionFeature {
   @Dependency(\.sleepManagement) var sleepManagement
   @Dependency(\.date.now) var now
   @Dependency(\.transcriptPersistence) var transcriptPersistence
+  @Dependency(\.aiProcessing) var aiProcessing
+  @Dependency(\.contextClient) var contextClient
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -122,6 +131,18 @@ struct TranscriptionFeature {
       case let .transcriptionError(error, audioURL):
         return handleTranscriptionError(&state, error: error, audioURL: audioURL)
 
+      case .aiProcessingFinished:
+        state.isAIProcessing = false
+        return .none
+
+      case let .contextCaptured(context):
+        state.capturedContext = context
+        return .none
+
+      case let .partialTranscriptUpdated(text):
+        state.partialTranscript = text
+        return .none
+
       case .modelMissing:
         return .none
 
@@ -161,17 +182,18 @@ private extension TranscriptionFeature {
   /// Effect to start monitoring hotkey events through the `keyEventMonitor`.
   func startHotKeyMonitoringEffect() -> Effect<Action> {
     .run { send in
-      var hotKeyProcessor: HotKeyProcessor = .init(hotkey: HotKey(key: nil, modifiers: [.option]))
-      @Shared(.isSettingHotKey) var isSettingHotKey: Bool
-      @Shared(.hexSettings) var hexSettings: HexSettings
+      nonisolated(unsafe) var hotKeyProcessor: HotKeyProcessor = .init(hotkey: HotKey(key: nil, modifiers: [.option]))
+      let _isSettingHotKey = Shared(wrappedValue: false, .isSettingHotKey)
+      let _hexSettings = Shared(wrappedValue: HexSettings(), .hexSettings)
 
       // Handle incoming input events (keyboard and mouse)
       let token = keyEventMonitor.handleInputEvent { inputEvent in
         // Skip if the user is currently setting a hotkey
-        if isSettingHotKey {
+        if _isSettingHotKey.wrappedValue {
           return false
         }
 
+        let hexSettings = _hexSettings.wrappedValue
         // Always keep hotKeyProcessor in sync with current user hotkey preference
         hotKeyProcessor.hotkey = hexSettings.hotkey
         let useDoubleTapOnly = hexSettings.doubleTapLockEnabled && hexSettings.useDoubleTapOnly
@@ -257,6 +279,40 @@ private extension TranscriptionFeature {
       await recording.warmUpRecorder()
     }
   }
+
+  /// Periodically snapshots the in-progress recording and transcribes it for live display.
+  func startLiveTranscriptionEffect(model: String, language: String?) -> Effect<Action> {
+    .run { send in
+      transcriptionFeatureLogger.info("Live transcription started, waiting 1.5s for initial audio...")
+      try? await Task.sleep(for: .seconds(1.5))
+
+      while !Task.isCancelled {
+        if let snapshotURL = await recording.snapshotCurrentRecording() {
+          transcriptionFeatureLogger.info("Live transcription: got snapshot, transcribing...")
+          do {
+            let options = DecodingOptions(
+              language: language,
+              detectLanguage: language == nil,
+              chunkingStrategy: .vad
+            )
+            let result = try await transcription.transcribe(snapshotURL, model, options) { _ in }
+            if !result.isEmpty {
+              transcriptionFeatureLogger.info("Live transcript partial: '\(result)'")
+              await send(.partialTranscriptUpdated(result))
+            }
+          } catch {
+            transcriptionFeatureLogger.warning("Live transcription chunk failed: \(error.localizedDescription)")
+          }
+          try? FileManager.default.removeItem(at: snapshotURL)
+        } else {
+          transcriptionFeatureLogger.debug("Live transcription: no snapshot available")
+        }
+
+        try? await Task.sleep(for: .seconds(1.5))
+      }
+    }
+    .cancellable(id: CancelID.liveTranscription, cancelInFlight: true)
+  }
 }
 
 // MARK: - HotKey Press/Release Handlers
@@ -294,25 +350,47 @@ private extension TranscriptionFeature {
       state.sourceAppBundleID = activeApp.bundleIdentifier
       state.sourceAppName = activeApp.localizedName
     }
+    state.capturedContext = nil
+    state.partialTranscript = ""
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
+
+    let contextEnrichmentEnabled = state.hexSettings.contextEnrichmentEnabled && state.hexSettings.aiProcessingEnabled
+    let liveTranscriptEnabled = state.hexSettings.liveTranscriptEnabled
+    let model = state.hexSettings.selectedModel
+    let language = state.hexSettings.outputLanguage
 
     // Prevent system sleep during recording
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
-      .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
+      .cancel(id: CancelID.liveTranscription),
+      .run { [sleepManagement, contextClient, preventSleep = state.hexSettings.preventSystemSleep] send in
         // Play sound immediately for instant feedback
         soundEffect.play(.startRecording)
 
         if preventSleep {
           await sleepManagement.preventSleep(reason: "Hex Voice Recording")
         }
+
+        // Capture context from active app before recording starts
+        if contextEnrichmentEnabled {
+          let context = await contextClient.captureContext()
+          await send(.contextCaptured(context))
+        }
+
         await recording.startRecording()
-      }
+      },
+      // Live transcription is disabled for now — chunked transcription conflicts with
+      // the single-model architecture, causing the model lock to stall the event tap
+      // and freeze keyboard/mouse input. Needs a dedicated lightweight model or
+      // streaming API to work safely.
+      // TODO: Re-enable with a separate model instance or WhisperKit streaming API
+      .none
     )
   }
 
   func handleStopRecording(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
+    state.partialTranscript = ""
     
     let stopTime = now
     let startTime = state.recordingStartTime
@@ -339,23 +417,29 @@ private extension TranscriptionFeature {
       // If the user recorded for less than minimumKeyTime and the hotkey is modifier-only,
       // discard the audio to avoid accidental triggers.
       transcriptionFeatureLogger.notice("Discarding short recording per decision \(String(describing: decision))")
-      return .run { _ in
-        let url = await recording.stopRecording()
-        guard !Task.isCancelled else { return }
-        try? FileManager.default.removeItem(at: url)
-      }
-      .cancellable(id: CancelID.recordingCleanup, cancelInFlight: true)
+      return .merge(
+        .cancel(id: CancelID.liveTranscription),
+        .run { _ in
+          let url = await recording.stopRecording()
+          guard !Task.isCancelled else { return }
+          try? FileManager.default.removeItem(at: url)
+        }
+        .cancellable(id: CancelID.recordingCleanup, cancelInFlight: true)
+      )
     }
 
     // Otherwise, proceed to transcription
     state.isTranscribing = true
     state.error = nil
+    state.partialTranscript = ""
     let model = state.hexSettings.selectedModel
     let language = state.hexSettings.outputLanguage
 
     state.isPrewarming = true
 
-    return .run { [sleepManagement] send in
+    return .merge(
+    .cancel(id: CancelID.liveTranscription),
+    .run { [sleepManagement] send in
       // Allow system to sleep again
       await sleepManagement.allowSleep()
 
@@ -384,6 +468,7 @@ private extension TranscriptionFeature {
       }
     }
     .cancellable(id: CancelID.transcription)
+    )
   }
 }
 
@@ -412,6 +497,14 @@ private extension TranscriptionFeature {
     // If empty text, nothing else to do
     guard !result.isEmpty else {
       return .none
+    }
+
+    // Voice command detection — check before any text processing
+    if state.hexSettings.voiceCommandsEnabled,
+       let command = VoiceCommandDetector.detect(result)
+    {
+      transcriptionFeatureLogger.info("Voice command detected: \(String(describing: command))")
+      return executeVoiceCommand(command, audioURL: audioURL)
     }
 
     let duration = state.recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
@@ -445,14 +538,38 @@ private extension TranscriptionFeature {
       return .none
     }
 
+    // Resolve AI processing mode (context-aware or manual)
+    let resolvedMode = resolveAIMode(state: state)
+    let aiEnabled = state.hexSettings.aiProcessingEnabled && resolvedMode != .off
+    let aiProvider = state.hexSettings.aiProvider
+
+    if aiEnabled {
+      state.isAIProcessing = true
+      transcriptionFeatureLogger.info("AI processing enabled: \(resolvedMode.displayName) mode via \(aiProvider.displayName)")
+    }
+
     let sourceAppBundleID = state.sourceAppBundleID
     let sourceAppName = state.sourceAppName
+    let capturedContext = state.capturedContext
     let transcriptionHistory = state.$transcriptionHistory
 
-    return .run { send in
+    return .run { [aiProcessing] send in
       do {
+        // AI post-processing (if enabled)
+        var finalResult = modifiedResult
+        if aiEnabled {
+          do {
+            finalResult = try await aiProcessing.process(modifiedResult, resolvedMode, aiProvider, capturedContext)
+            transcriptionFeatureLogger.info("AI processing produced \(finalResult.count) chars from \(modifiedResult.count) chars")
+          } catch {
+            transcriptionFeatureLogger.error("AI processing failed, using unprocessed text: \(error.localizedDescription)")
+            // Fall back to unprocessed text on AI error
+          }
+          await send(.aiProcessingFinished)
+        }
+
         try await finalizeRecordingAndStoreTranscript(
-          result: modifiedResult,
+          result: finalResult,
           duration: duration,
           sourceAppBundleID: sourceAppBundleID,
           sourceAppName: sourceAppName,
@@ -464,6 +581,50 @@ private extension TranscriptionFeature {
       }
     }
     .cancellable(id: CancelID.transcription)
+  }
+
+  /// Resolves the AI mode based on context-aware rules or manual selection.
+  func resolveAIMode(state: State) -> AIProcessingMode {
+    if let autoMode = AppModeResolver.resolve(
+      bundleID: state.sourceAppBundleID,
+      customRules: state.hexSettings.appModeRules,
+      contextAwareEnabled: state.hexSettings.contextAwareAutoMode
+    ) {
+      return autoMode
+    }
+    return state.hexSettings.aiProcessingMode
+  }
+
+  /// Executes a voice command via keyboard simulation instead of pasting text.
+  func executeVoiceCommand(_ command: VoiceCommand, audioURL: URL) -> Effect<Action> {
+    .run { [pasteboard, soundEffect] _ in
+      try? FileManager.default.removeItem(at: audioURL)
+
+      switch command {
+      case .newParagraph:
+        await pasteboard.sendKeyboardCommand(.enter)
+        try? await Task.sleep(for: .milliseconds(50))
+        await pasteboard.sendKeyboardCommand(.enter)
+      case .newLine:
+        await pasteboard.sendKeyboardCommand(.enter)
+      case .selectAll:
+        await pasteboard.sendKeyboardCommand(.init(key: .a, modifiers: [.command]))
+      case .undo:
+        await pasteboard.sendKeyboardCommand(.init(key: .z, modifiers: [.command]))
+      case .redo:
+        await pasteboard.sendKeyboardCommand(.init(key: .z, modifiers: [.command, .shift]))
+      case .period:
+        await pasteboard.paste(".")
+      case .comma:
+        await pasteboard.paste(",")
+      case .questionMark:
+        await pasteboard.paste("?")
+      case .exclamationMark:
+        await pasteboard.paste("!")
+      }
+
+      soundEffect.play(.pasteTranscript)
+    }
   }
 
   func handleTranscriptionError(
@@ -531,9 +692,12 @@ private extension TranscriptionFeature {
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
+    state.isAIProcessing = false
+    state.partialTranscript = ""
 
     return .merge(
       .cancel(id: CancelID.transcription),
+      .cancel(id: CancelID.liveTranscription),
       .run { [sleepManagement] _ in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -570,7 +734,9 @@ struct TranscriptionView: View {
   @ObserveInjection var inject
 
   var status: TranscriptionIndicatorView.Status {
-    if store.isTranscribing {
+    if store.isAIProcessing {
+      return .aiProcessing
+    } else if store.isTranscribing {
       return .transcribing
     } else if store.isRecording {
       return .recording
@@ -582,10 +748,16 @@ struct TranscriptionView: View {
   }
 
   var body: some View {
-    TranscriptionIndicatorView(
-      status: status,
-      meter: store.meter
-    )
+    VStack(spacing: 8) {
+      TranscriptionIndicatorView(
+        status: status,
+        meter: store.meter
+      )
+      LiveTranscriptView(
+        text: store.partialTranscript,
+        isVisible: store.isRecording && store.hexSettings.liveTranscriptEnabled
+      )
+    }
     .task {
       await store.send(.task).finish()
     }

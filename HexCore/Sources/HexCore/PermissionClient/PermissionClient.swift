@@ -93,3 +93,52 @@ extension DependencyValues {
     set { self[PermissionClient.self] = newValue }
   }
 }
+
+#if !os(macOS)
+import AVFoundation
+
+// iOS live implementation — only microphone is relevant; accessibility & input
+// monitoring don't exist on iOS. The iOS app uses AVAudioApplication directly
+// in IOSRecordingClient, but we still need a PermissionClient conformance so
+// that DependencyValues lookups compile.
+extension PermissionClient: DependencyKey {
+  public static var liveValue: Self {
+    Self(
+      microphoneStatus: {
+        if #available(iOS 17.0, *) {
+          switch AVAudioApplication.shared.recordPermission {
+          case .granted: return .granted
+          case .denied: return .denied
+          case .undetermined: return .notDetermined
+          @unknown default: return .denied
+          }
+        } else {
+          switch AVAudioSession.sharedInstance().recordPermission {
+          case .granted: return .granted
+          case .denied: return .denied
+          case .undetermined: return .notDetermined
+          @unknown default: return .denied
+          }
+        }
+      },
+      accessibilityStatus: { .granted },
+      inputMonitoringStatus: { .granted },
+      requestMicrophone: {
+        if #available(iOS 17.0, *) {
+          return await AVAudioApplication.requestRecordPermission()
+        } else {
+          return await withCheckedContinuation { cont in
+            AVAudioSession.sharedInstance().requestRecordPermission { cont.resume(returning: $0) }
+          }
+        }
+      },
+      requestAccessibility: {},
+      requestInputMonitoring: { true },
+      openMicrophoneSettings: {},
+      openAccessibilitySettings: {},
+      openInputMonitoringSettings: {},
+      observeAppActivation: { .never }
+    )
+  }
+}
+#endif

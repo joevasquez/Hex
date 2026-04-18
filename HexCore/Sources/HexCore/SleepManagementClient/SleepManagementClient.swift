@@ -42,3 +42,16 @@ extension DependencyValues {
     set { self[SleepManagementClient.self] = newValue }
   }
 }
+
+#if !os(macOS)
+// iOS has no IOKit power management APIs; sleep is managed by the system.
+// Provide a no-op live implementation so DependencyValues lookups succeed.
+extension SleepManagementClient: DependencyKey {
+  public static var liveValue: Self {
+    Self(
+      preventSleep: { _ in },
+      allowSleep: {}
+    )
+  }
+}
+#endif

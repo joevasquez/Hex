@@ -1,3 +1,4 @@
+#if os(macOS)
 @preconcurrency import AppKit
 import AVFoundation
 import CoreGraphics
@@ -189,3 +190,5 @@ actor PermissionClientLive {
     }
   }
 }
+
+#endif

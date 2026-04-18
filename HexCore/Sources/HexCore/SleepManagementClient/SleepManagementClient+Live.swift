@@ -1,3 +1,4 @@
+#if os(macOS)
 import Dependencies
 import IOKit.pwr_mgt
 
@@ -48,3 +49,5 @@ actor SleepManagementClientLive {
     }
   }
 }
+
+#endif

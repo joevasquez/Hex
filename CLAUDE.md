@@ -1,16 +1,24 @@
-# Hex – Dev Notes for Agents
+# Quill – Dev Notes for Agents
 
 This file provides guidance for coding agents working in this repo.
 
+> **Naming note:** The project was renamed from **Hex** (Kit Langton's original) to **Quill** (Joe Vasquez's fork). Internal module names like `HexCore`, `HexSettings`, and `HexLog` intentionally retain the "Hex" name — they are internal technical identifiers, and renaming them would be pure churn. User-facing identifiers (bundle ID, product name, storage paths, copyright, About view) have all been updated to Quill / Joe Vasquez.
+
 ## Project Overview
 
-Hex is a macOS menu bar application for on‑device voice‑to‑text. It supports Whisper (Core ML via WhisperKit) and Parakeet TDT v3 (Core ML via FluidAudio). Users activate transcription with hotkeys; text can be auto‑pasted into the active app.
+Quill is a macOS menu bar application (plus an iOS companion app) for on-device voice-to-text with optional AI post-processing. It supports Whisper (Core ML via WhisperKit) and Parakeet TDT v3 (Core ML via FluidAudio). Users activate transcription with hotkeys; text can be auto-pasted into the active app, with optional LLM clean-up via OpenAI or Anthropic.
+
+**Bundle IDs:**
+- macOS: `com.joevasquez.Quill` (release), `com.joevasquez.Quill.debug` (debug)
+- iOS: `com.joevasquez.Quill.iOS`
+
+**Storage:** `~/Library/Application Support/com.joevasquez.Quill/` on macOS.
 
 ## Build & Development Commands
 
 ```bash
 # Build the app
-xcodebuild -scheme Hex -configuration Release
+xcodebuild -scheme Quill -configuration Release
 
 # Run tests (must be run from HexCore directory for unit tests)
 cd HexCore && swift test
@@ -42,7 +50,7 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 - **WhisperKit**: Core ML transcription (tracking main branch)
 - **FluidAudio (Parakeet)**: Core ML ASR (multilingual) default model
 - **Sauce**: Keyboard event monitoring
-- **Sparkle**: Auto-updates (feed: https://hex-updates.s3.amazonaws.com/appcast.xml)
+- **Sparkle**: Auto-update framework is linked but the feed URL has been removed for the Quill fork. Joe can host his own appcast on GitHub Releases or an S3 bucket if/when he wants to ship updates.
 - **Swift Composable Architecture**: State management
 - **Inject** Hot Reloading for SwiftUI
 
@@ -73,10 +81,10 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 ### Storage Locations
 
 - WhisperKit models
-  - `~/Library/Application Support/com.kitlangton.Hex/models/argmaxinc/whisperkit-coreml/<model>`
+  - `~/Library/Application Support/com.joevasquez.Quill/models/argmaxinc/whisperkit-coreml/<model>`
 - Parakeet (FluidAudio)
   - We set `XDG_CACHE_HOME` on launch so Parakeet caches under the app container:
-  - `~/Library/Containers/com.kitlangton.Hex/Data/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3-coreml`
+  - `~/Library/Containers/com.joevasquez.Quill/Data/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3-coreml`
   - Legacy `~/.cache/fluidaudio/Models/…` is not visible to the sandbox; re‑download or import.
 
 ### Progress + Availability
@@ -106,7 +114,7 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 Set at app launch and logged:
 
 ```
-XDG_CACHE_HOME = ~/Library/Containers/com.kitlangton.Hex/Data/Library/Application Support/com.kitlangton.Hex/cache
+XDG_CACHE_HOME = ~/Library/Containers/com.joevasquez.Quill/Data/Library/Application Support/com.joevasquez.Quill/cache
 ```
 
 FluidAudio models reside under `Application Support/FluidAudio/Models`.

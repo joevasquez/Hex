@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 
 public enum RecordingAudioBehavior: String, Codable, CaseIterable, Equatable, Sendable {
@@ -329,3 +330,5 @@ private enum HexSettingsSchema {
 		SettingsField(.liveTranscriptEnabled, keyPath: \.liveTranscriptEnabled, default: defaults.liveTranscriptEnabled).eraseToAny(),
 	]
 }
+
+#endif

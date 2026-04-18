@@ -1,8 +1,8 @@
 {
   "fill" : {
     "linear-gradient" : [
-      "gray:0.19846,1.00000",
-      "srgb:0.00000,0.00000,0.00000,1.00000"
+      "srgb:0.36000,0.23000,0.70000,1.00000",
+      "srgb:0.18000,0.12000,0.45000,1.00000"
     ],
     "orientation" : {
       "start" : {
@@ -11,7 +11,7 @@
       },
       "stop" : {
         "x" : 0.5,
-        "y" : 0.7
+        "y" : 1
       }
     }
   },
@@ -22,7 +22,7 @@
           "image-name" : "Image.png",
           "name" : "Image",
           "position" : {
-            "scale" : 0.5,
+            "scale" : 0.65,
             "translation-in-points" : [
               0,
               0
@@ -32,11 +32,7 @@
       ],
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+        "opacity" : 0.4
       }
     }
   ],

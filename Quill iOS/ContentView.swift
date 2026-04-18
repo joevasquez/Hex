@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import Combine
 import HexCore
 import SwiftUI
 import WhisperKit

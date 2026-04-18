@@ -5,11 +5,11 @@
 //  Sends transcribed text through a cloud LLM for AI post-processing.
 //
 
-import ComposableArchitecture
 import Dependencies
 import DependenciesMacros
 import Foundation
 import HexCore
+import os
 
 private let aiLogger = HexLog.aiProcessing
 

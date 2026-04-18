@@ -44,14 +44,14 @@ extension DependencyValues {
 // MARK: - Keychain Keys
 
 enum KeychainKey {
-  static let openAIAPIKey = "com.kitlangton.Hex.openAIAPIKey"
-  static let anthropicAPIKey = "com.kitlangton.Hex.anthropicAPIKey"
+  static let openAIAPIKey = "com.joevasquez.Quill.openAIAPIKey"
+  static let anthropicAPIKey = "com.joevasquez.Quill.anthropicAPIKey"
 }
 
 // MARK: - Live Implementation
 
 private struct KeychainClientLive {
-  private let service = "com.kitlangton.Hex"
+  private let service = "com.joevasquez.Quill"
 
   func save(key: String, value: String) throws {
     guard let data = value.data(using: .utf8) else { return }

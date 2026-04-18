@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 — Quill
+
+- Renamed project from Hex to **Quill**; new bundle identifier `com.joevasquez.Quill`, new purple/indigo feather icon, copyright updated to Joe Vasquez.
+- Added **Quill iOS app** (standalone) — record, transcribe with Whisper, optionally clean up via AI, share via iOS share sheet. Week-1 MVP — no keyboard extension yet.
+- Made `HexCore` package cross-platform (iOS 16+ and macOS 15+). macOS-only files (hotkey processing, permissions, sleep management, settings) are gated with `#if os(macOS)`.
+- See `QuilliOS/SETUP.md` for instructions to wire the iOS target into Xcode.
+
 ## 0.7.3
 
 ### Patch Changes

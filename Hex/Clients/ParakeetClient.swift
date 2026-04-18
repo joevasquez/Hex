@@ -10,7 +10,7 @@ actor ParakeetClient {
   private var currentVariant: ParakeetModel?
   private let logger = HexLog.parakeet
   private let vendorDirs = [
-    // Our app-specific cache path convention (under XDG or com.kitlangton.Hex/cache)
+    // Our app-specific cache path convention (under XDG or com.joevasquez.Quill/cache)
     "fluidaudio/Models",
     "FluidAudio/Models"
   ]

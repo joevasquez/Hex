@@ -1,42 +1,42 @@
-# Hex — Voice → Text
+# Quill — Voice → Text, with AI
 
-Press-and-hold a hotkey to transcribe your voice and paste the result wherever you're typing.
+Press-and-hold a hotkey to transcribe your voice and paste the result wherever you're typing. Optionally run it through an AI model first to clean up grammar, format as an email, convert to bullet notes, and more.
 
-**[Download Hex for macOS](https://hex-updates.s3.us-east-1.amazonaws.com/hex-latest.dmg)**
+> Apple Silicon only. macOS 15+. iOS 16+ (iOS app in beta).
 
-> **Note:** Hex is currently only available for **Apple Silicon** Macs.
+## What Quill does
 
-Or download via homebrew:
-```bash
-brew install --cask kitlangton-hex
-```
+**macOS app (menu bar):**
+- Hold a global hotkey → speak → release → transcribed text is pasted into your active app
+- Fully on-device transcription via [Parakeet TDT v3](https://github.com/FluidInference/FluidAudio) (default, multilingual) or [WhisperKit](https://github.com/argmaxinc/WhisperKit)
+- Optional AI post-processing (OpenAI / Anthropic) with modes: Clean, Email, Notes, Message, Code
+- Context-aware auto-mode: detect active app and pick the right AI mode (Mail → Email, Slack → Message, VS Code → Code)
+- Voice commands: "new paragraph", "select all", "undo", etc. are detected and executed instead of being pasted as text
+- Custom vocabulary, word removals (filler words), word remappings, full transcription history
+- Drag-and-drop audio/video files to transcribe
 
-I've opened-sourced the project in the hopes that others will find it useful! Hex supports both [Parakeet TDT v3](https://github.com/FluidInference/FluidAudio) via the awesome [FluidAudio](https://github.com/FluidInference/FluidAudio) (the default—it's frickin' unbelievable: fast, multilingual, and cloud-optimized) and the awesome [WhisperKit](https://github.com/argmaxinc/WhisperKit) for on-device transcription. We use the incredible [Swift Composable Architecture](https://github.com/pointfreeco/swift-composable-architecture) for structuring the app. Please open issues with any questions or feedback! ❤️
+**iOS app (standalone):**
+- Record voice notes on-device with Whisper
+- Optionally run through your AI mode of choice
+- Share via iOS share sheet: email, iMessage, Notes, clipboard
 
-## Instructions
+## Installation
 
-Once you open Hex, you'll need to grant it microphone and accessibility permissions—so it can record your voice and paste the transcribed text into any application, respectively.
+macOS builds are distributed via GitHub Releases on this repo. iOS requires building from source in Xcode with your Apple Developer account.
 
-Once you've configured a global hotkey, there are **two recording modes**:
+## Architecture
 
-1. **Press-and-hold** the hotkey to begin recording, say whatever you want, and then release the hotkey to start the transcription process. 
-2. **Double-tap** the hotkey to *lock recording*, say whatever you want, and then **tap** the hotkey once more to start the transcription process.
+TCA (Composable Architecture) app with:
+- `HexCore` Swift Package — shared logic, models, settings (cross-platform macOS + iOS)
+- `Hex/` — macOS app target
+- `QuilliOS/` — iOS app target
 
-## Contributing
+## Credits
 
-**Issue reports are welcome!** If you encounter bugs or have feature requests, please [open an issue](https://github.com/kitlangton/Hex/issues).
+Quill is a fork of [**Hex** by Kit Langton](https://github.com/kitlangton/Hex), extended by [Joe Vasquez](https://joevasquez.com) with AI post-processing, context enrichment, voice commands, file transcription, and an iOS app.
 
-**Note on Pull Requests:** At this stage, I'm not actively reviewing code contributions for significant features or core logic changes. The project is evolving rapidly and it's easier for me to work directly from issue reports. Bug fixes and documentation improvements are still appreciated, but please open an issue first to discuss before investing time in a large PR. Thanks for understanding!
-
-### Changelog workflow
-
-- **For AI agents:** Run `bun run changeset:add-ai <type> "summary"` (e.g., `bun run changeset:add-ai patch "Fix clipboard timing"`) to create a changeset non-interactively.
-- **For humans:** Run `bunx changeset` when your PR needs release notes. Pick `patch`, `minor`, or `major` and write a short summary—this creates a `.changeset/*.md` fragment.
-- Check what will ship with `bunx changeset status --verbose`.
-- `npm run sync-changelog` (or `bun run tools/scripts/sync-changelog.ts`) mirrors the root `CHANGELOG.md` into `Hex/Resources/changelog.md` so the in-app sheet always matches GitHub releases.
-- The release tool consumes the pending fragments, bumps `package.json` + `Info.plist`, regenerates `CHANGELOG.md`, and feeds the resulting section to GitHub + Sparkle automatically. Releases fail fast if no changesets are queued, so you can't forget.
-- If you truly need to ship without pending Changesets (for example, re-running a failed publish), the release script will now prompt you to confirm and choose a `patch`/`minor`/`major` bump interactively before continuing.
+The original Hex project is the foundation — all props to Kit for the clean architecture and approach.
 
 ## License
 
-This project is licensed under the MIT License. See `LICENSE` for details.
+MIT License. See `LICENSE` for details.

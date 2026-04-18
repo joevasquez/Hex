@@ -4,6 +4,7 @@
 //
 //  Created by Kit Langton on 1/28/25.
 //
+#if os(macOS)
 import Dependencies
 import Foundation
 import SwiftUI
@@ -535,3 +536,5 @@ extension HotKeyProcessor {
         lastTapAt = nil
     }
 }
+
+#endif

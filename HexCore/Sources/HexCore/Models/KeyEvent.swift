@@ -5,6 +5,7 @@
 //  Created by Kit Langton on 1/28/25.
 //
 
+#if os(macOS)
 import Sauce
 
 public enum InputEvent {
@@ -21,3 +22,5 @@ public struct KeyEvent {
         self.modifiers = modifiers
     }
 }
+
+#endif

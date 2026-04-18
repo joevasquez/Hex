@@ -35,15 +35,21 @@ struct AboutView: View {
                     }
                 }
                 HStack {
-                    Label("Hex is open source", systemImage: "apple.terminal.on.rectangle")
+                    Label("Quill is open source", systemImage: "apple.terminal.on.rectangle")
                     Spacer()
-                    Link("Visit our GitHub", destination: URL(string: "https://github.com/kitlangton/Hex/")!)
+                    Link("Visit GitHub", destination: URL(string: "https://github.com/joevasquez/Hex")!)
                 }
-                
+
                 HStack {
-                    Label("Support the developer", systemImage: "heart")
+                    Label("Built by Joe Vasquez", systemImage: "person.circle")
                     Spacer()
-                    Link("Become a Sponsor", destination: URL(string: "https://github.com/sponsors/kitlangton")!)
+                    Link("joevasquez.com", destination: URL(string: "https://joevasquez.com")!)
+                }
+
+                HStack {
+                    Label("Based on Hex by Kit Langton", systemImage: "arrow.triangle.branch")
+                    Spacer()
+                    Link("Original project", destination: URL(string: "https://github.com/kitlangton/Hex")!)
                 }
             }
         }

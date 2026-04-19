@@ -187,34 +187,90 @@ struct ContentView: View {
         backgroundGradient
           .ignoresSafeArea()
 
-        ScrollView {
-          VStack(spacing: 28) {
-            modeChipRow
-            recordButton
-            statusLabel
-            resultArea
-            Spacer(minLength: 40)
-          }
-          .padding(.horizontal)
-          .padding(.top, 8)
-        }
-      }
-      .navigationTitle("Quill")
-      .navigationBarTitleDisplayMode(.large)
-      .toolbar {
-        ToolbarItem(placement: .topBarTrailing) {
-          Button {
-            showingSettings = true
-          } label: {
-            Image(systemName: "gearshape")
-              .font(.title3)
+        VStack(spacing: 0) {
+          headerBar
+
+          ScrollView {
+            VStack(spacing: 28) {
+              modeChipRow
+              recordButton
+              statusLabel
+              resultArea
+              Spacer(minLength: 40)
+            }
+            .padding(.horizontal)
+            .padding(.top, 16)
           }
         }
       }
+      .toolbar(.hidden, for: .navigationBar)
       .sheet(isPresented: $showingSettings) {
         SettingsView()
       }
       .onAppear { idlePulse = true }
+    }
+  }
+
+  // MARK: - Custom header
+
+  private var headerBar: some View {
+    HStack(spacing: 12) {
+      logoMark
+
+      Text("Quill")
+        .font(.system(size: 34, weight: .bold, design: .serif))
+        .foregroundStyle(
+          LinearGradient(
+            colors: [.purple, .blue],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+          )
+        )
+        .kerning(0.5)
+
+      Spacer()
+
+      Button {
+        UISelectionFeedbackGenerator().selectionChanged()
+        showingSettings = true
+      } label: {
+        Image(systemName: "gearshape")
+          .font(.title3)
+          .foregroundStyle(.secondary)
+          .frame(width: 36, height: 36)
+          .background(
+            Circle().fill(Color.secondary.opacity(0.12))
+          )
+      }
+      .buttonStyle(.plain)
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 12)
+    .background(.ultraThinMaterial)
+    .overlay(alignment: .bottom) {
+      Rectangle()
+        .fill(Color.primary.opacity(0.08))
+        .frame(height: 0.5)
+    }
+  }
+
+  private var logoMark: some View {
+    ZStack {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(
+          LinearGradient(
+            colors: [Color.purple, Color.blue],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+          )
+        )
+        .frame(width: 38, height: 38)
+        .shadow(color: .purple.opacity(0.35), radius: 6, y: 3)
+
+      Image(systemName: "pencil.tip")
+        .font(.system(size: 20, weight: .semibold))
+        .foregroundStyle(.white)
+        .rotationEffect(.degrees(-12))
     }
   }
 

@@ -17,8 +17,11 @@ Quill is a macOS menu bar application (plus an iOS companion app) for on-device 
 ## Build & Development Commands
 
 ```bash
-# Build the app
+# Build the macOS app
 xcodebuild -scheme Quill -configuration Release
+
+# Build the iOS app (Simulator)
+xcodebuild -scheme "Quill iOS" -destination 'generic/platform=iOS Simulator' build
 
 # Run tests (must be run from HexCore directory for unit tests)
 cd HexCore && swift test
@@ -123,6 +126,44 @@ FluidAudio models reside under `Application Support/FluidAudio/Models`.
 
 - Settings → Transcription Model shows a compact list with radio selection, accuracy/speed dots, size on right, and trailing menu / download‑check icon.
 - Context menu offers Show in Finder / Delete.
+
+## iOS Companion App
+
+The iOS app lives in the `Quill iOS/` folder (note: folder name has a space — the Xcode build setting is `INFOPLIST_FILE = "Quill iOS/Info.plist"`). It's a lightweight companion, not a feature-parity port of macOS.
+
+### Scope
+
+- On-device transcription via WhisperKit (Core ML). No FluidAudio / Parakeet on iOS yet.
+- Optional AI post-processing using the shared `AIProcessingClient` from `HexCore` (OpenAI or Anthropic).
+- API keys stored in the iOS Keychain via the shared cross-platform `KeychainClient`.
+- No hotkeys, no auto-paste, no menu bar. User taps a button → speaks → gets text → shares/copies.
+
+### Structure
+
+- `QuilliOSApp.swift` — `@main` entry point.
+- `ContentView.swift` — main screen: record button, status, result area with raw + AI-enhanced transcript.
+- `SettingsView.swift` — sheet with model selector, AI toggle/mode/provider, API key field.
+- `QuillIOSSettings.swift` — `@AppStorage` keys and defaults (lives in `UserDefaults`, not `HexSettings`).
+- `Clients/IOSRecordingClient.swift` — `AVAudioRecorder` wrapper with metering and permission handling (iOS equivalent of the macOS `RecordingClient`).
+
+### Shared Code via `HexCore`
+
+The iOS target imports `HexCore` for:
+- `AIProcessingMode`, `AIProvider`, `AIProcessingClient` (LLM post-processing).
+- `KeychainClient` (cross-platform wrapper around Security.framework; uses `CFDictionary` queries to avoid Swift bridging issues on iOS).
+- `KeychainKey.openAIAPIKey` / `.anthropicAPIKey` constants.
+
+macOS-only clients (`SleepManagementClient`, `PermissionClient`) have iOS stub `liveValue`s so `HexCore` compiles for both platforms.
+
+### Settings Model
+
+iOS uses `@AppStorage` with plain `UserDefaults` keys (namespaced as `quill.*`), **not** the macOS `HexSettings` struct. Keep the two in sync manually if adding shared settings.
+
+Defaults: model = `openai_whisper-tiny.en`, mode = `clean`, provider = `anthropic`, AI disabled.
+
+### Permissions
+
+Microphone access is requested via `AVAudioApplication.requestRecordPermission`. The prompt string comes from `NSMicrophoneUsageDescription` in `Quill iOS/Info.plist`.
 
 ## Troubleshooting
 

@@ -175,17 +175,25 @@ struct AppFeature {
   
   private func startPasteLastTranscriptMonitoring() -> Effect<Action> {
     .run { send in
+      // Capture the shared *storage references* (Shared<Value> is Sendable) rather
+      // than the @Shared property wrapper's var binding. Capturing the wrapper
+      // produces a "reference to captured var in concurrently-executing code"
+      // warning (hard error in Swift 6) and, more importantly, is a real data race
+      // because the closure runs on the CGEvent tap's main-thread callback on every
+      // key press. We project the Shared refs once and read them fresh on each hit.
       @Shared(.isSettingPasteLastTranscriptHotkey) var isSettingPasteLastTranscriptHotkey: Bool
       @Shared(.hexSettings) var hexSettings: HexSettings
+      let sharedIsSettingPaste = $isSettingPasteLastTranscriptHotkey
+      let sharedHexSettings = $hexSettings
 
       let token = keyEventMonitor.handleKeyEvent { keyEvent in
         // Skip if user is setting a hotkey
-        if isSettingPasteLastTranscriptHotkey {
+        if sharedIsSettingPaste.wrappedValue {
           return false
         }
 
         // Check if this matches the paste last transcript hotkey
-        guard let pasteHotkey = hexSettings.pasteLastTranscriptHotkey,
+        guard let pasteHotkey = sharedHexSettings.wrappedValue.pasteLastTranscriptHotkey,
               let key = keyEvent.key,
               key == pasteHotkey.key,
               keyEvent.modifiers.matchesExactly(pasteHotkey.modifiers) else {

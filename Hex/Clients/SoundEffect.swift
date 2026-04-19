@@ -172,11 +172,8 @@ actor SoundEffectsClientLive {
     isEngineRunning = false
   }
 
-  deinit {
-    playerNodes.values.forEach {
-      $0.stop()
-      engine.detach($0)
-    }
-    engine.stop()
-  }
+  // No explicit deinit — touching actor-isolated state from a nonisolated
+  // deinit is a Swift 6 error. AVAudioEngine and AVAudioPlayerNode both
+  // stop and release their resources on their own dealloc, so there's
+  // nothing meaningful to clean up here anyway.
 }

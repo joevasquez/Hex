@@ -355,9 +355,9 @@ private extension TranscriptionFeature {
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
 
     let contextEnrichmentEnabled = state.hexSettings.contextEnrichmentEnabled && state.hexSettings.aiProcessingEnabled
-    let liveTranscriptEnabled = state.hexSettings.liveTranscriptEnabled
-    let model = state.hexSettings.selectedModel
-    let language = state.hexSettings.outputLanguage
+    // liveTranscriptEnabled / selectedModel / outputLanguage are intentionally unread
+    // here — the live transcription effect is disabled (see note below). Re-introduce
+    // them when the streaming path returns.
 
     // Prevent system sleep during recording
     return .merge(

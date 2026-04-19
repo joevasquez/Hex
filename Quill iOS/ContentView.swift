@@ -137,7 +137,8 @@ final class RecordingViewModel: ObservableObject {
       }
 
       let results = try await whisperKit!.transcribe(audioPath: url.path)
-      let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+      let rawText = results.map(\.text).joined(separator: " ")
+      let text = WhisperOutputCleaner.clean(rawText)
       rawTranscript = text
 
       try? FileManager.default.removeItem(at: url)

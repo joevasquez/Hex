@@ -477,11 +477,18 @@ private extension TranscriptionFeature {
 private extension TranscriptionFeature {
   func handleTranscriptionResult(
     _ state: inout State,
-    result: String,
+    result rawResult: String,
     audioURL: URL
   ) -> Effect<Action> {
     state.isTranscribing = false
     state.isPrewarming = false
+
+    // Strip Whisper's non-speech diagnostic tokens ([BLANK_AUDIO],
+    // [ Silence ], [Music], [APPLAUSE], [INAUDIBLE], etc.) before any
+    // downstream step sees the transcript. Otherwise those tokens leak
+    // into the active app's paste buffer, word-remapping output, voice
+    // command detection, and history.
+    let result = WhisperOutputCleaner.clean(rawResult)
 
     // Check for force quit command (emergency escape hatch)
     if ForceQuitCommandDetector.matches(result) {

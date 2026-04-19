@@ -175,6 +175,8 @@ struct ContentView: View {
   @State private var showingNotesList = false
   @State private var idlePulse = false
   @State private var lastAppendedTranscript: String = ""
+  @State private var showCopied = false
+  @State private var copyResetTask: Task<Void, Never>?
 
   private var aiMode: AIProcessingMode {
     AIProcessingMode(rawValue: aiModeRaw) ?? .clean
@@ -582,64 +584,121 @@ struct ContentView: View {
 
   // MARK: - Result
 
+  /// The main content canvas below the record button. Shows the full
+  /// active note's body (not just the latest recording's transcript) so
+  /// successive recordings visibly stitch into a single continuous note —
+  /// e.g. recording a few sections of a conference talk with a pause
+  /// between them, you see the full composite transcript grow downward.
+  /// Auto-scrolls to the bottom on every body change so the newest
+  /// content is always in view.
   @ViewBuilder
   private var resultArea: some View {
-    if vm.hasResult {
+    if let note = notes.activeNote, !note.body.isEmpty {
       VStack(alignment: .leading, spacing: 14) {
-        if aiMode != .off && !vm.processedTranscript.isEmpty {
-          resultCard(
-            title: "\(aiMode.displayName) mode",
-            icon: "sparkles",
-            tint: .purple,
-            text: vm.processedTranscript
-          )
-
-          DisclosureGroup {
-            Text(vm.rawTranscript)
-              .textSelection(.enabled)
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .padding(.top, 8)
-          } label: {
-            Label("Raw transcript", systemImage: "waveform")
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-          }
-          .padding(.horizontal, 4)
-        } else {
-          resultCard(
-            title: "Transcript",
-            icon: "waveform",
-            tint: .blue,
-            text: vm.rawTranscript
-          )
-        }
-
-        HStack(spacing: 12) {
-          ShareLink(item: vm.displayedText) {
-            Label("Share", systemImage: "square.and.arrow.up")
-              .frame(maxWidth: .infinity)
-              .padding(.vertical, 4)
-          }
-          .buttonStyle(.borderedProminent)
-          .tint(aiMode == .off ? .blue : .purple)
-
-          Button {
-            UIPasteboard.general.string = vm.displayedText
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-          } label: {
-            Label("Copy", systemImage: "doc.on.doc")
-              .frame(maxWidth: .infinity)
-              .padding(.vertical, 4)
-          }
-          .buttonStyle(.bordered)
-        }
+        noteCanvas(for: note)
+        actionButtons(for: note.body)
       }
       .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
   }
 
+  private func noteCanvas(for note: Note) -> some View {
+    let tint: Color = aiMode == .off ? .blue : .purple
+    return VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 8) {
+        Label(
+          aiMode == .off ? "Transcript" : "\(aiMode.displayName) mode",
+          systemImage: aiMode == .off ? "waveform" : "sparkles"
+        )
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(tint)
+
+        Spacer()
+
+        Text("\(note.wordCount) words")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
+      }
+
+      ScrollViewReader { proxy in
+        ScrollView {
+          Text(note.body)
+            .textSelection(.enabled)
+            .font(.body)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .id("noteBottom")
+        }
+        .frame(maxHeight: 320)
+        // Animate the proxy scroll so the newest content slides into view
+        // rather than jumping abruptly when an append lands.
+        .onChange(of: note.body) { _, _ in
+          withAnimation(.easeOut(duration: 0.4)) {
+            proxy.scrollTo("noteBottom", anchor: .bottom)
+          }
+        }
+        .onAppear {
+          proxy.scrollTo("noteBottom", anchor: .bottom)
+        }
+      }
+    }
+    .padding(16)
+    .background(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .fill(tint.opacity(0.08))
+        .overlay(
+          RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(tint.opacity(0.15), lineWidth: 1)
+        )
+    )
+  }
+
+  private func actionButtons(for text: String) -> some View {
+    let shareTint: Color = aiMode == .off ? .blue : .purple
+
+    return HStack(spacing: 12) {
+      ShareLink(item: text) {
+        Label("Share", systemImage: "square.and.arrow.up")
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 4)
+      }
+      .buttonStyle(.borderedProminent)
+      .tint(shareTint)
+
+      Button {
+        copyToClipboard(text)
+      } label: {
+        HStack(spacing: 6) {
+          Image(systemName: showCopied ? "checkmark.circle.fill" : "doc.on.doc")
+            .contentTransition(.symbolEffect(.replace))
+          Text(showCopied ? "Copied" : "Copy")
+            .contentTransition(.interpolate)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
+        .foregroundStyle(showCopied ? Color.green : Color.primary)
+      }
+      .buttonStyle(.bordered)
+      .tint(showCopied ? .green : .accentColor)
+      .animation(.easeInOut(duration: 0.2), value: showCopied)
+    }
+  }
+
+  private func copyToClipboard(_ text: String) {
+    UIPasteboard.general.string = text
+    UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+    // Flip to the "Copied" state, then auto-revert after ~1.5s.
+    copyResetTask?.cancel()
+    showCopied = true
+    copyResetTask = Task { @MainActor in
+      try? await Task.sleep(for: .milliseconds(1500))
+      guard !Task.isCancelled else { return }
+      showCopied = false
+    }
+  }
+
+  // Legacy signature kept for backwards-compat in case a preview still
+  // references it — unused in the live layout now.
   private func resultCard(title: String, icon: String, tint: Color, text: String) -> some View {
     VStack(alignment: .leading, spacing: 10) {
       HStack {

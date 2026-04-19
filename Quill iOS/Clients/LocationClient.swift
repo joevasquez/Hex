@@ -9,6 +9,7 @@
 
 import CoreLocation
 import Foundation
+import MapKit
 
 @MainActor
 final class LocationClient: NSObject {
@@ -79,21 +80,53 @@ final class LocationClient: NSObject {
   }
 
   private func reverseGeocode(_ location: CLLocation) async -> String? {
+    // CLGeocoder was deprecated in iOS 26 in favor of
+    // MKReverseGeocodingRequest. Use the new API when available and fall
+    // back on older OS versions. Both yield an MKPlacemark / CLPlacemark
+    // with the same .subLocality / .locality / .administrativeArea fields
+    // we actually care about.
+    let placemark: CLPlacemark?
+    if #available(iOS 26.0, *) {
+      placemark = await mapKitReverseGeocode(location)
+    } else {
+      placemark = await legacyReverseGeocode(location)
+    }
+    guard let p = placemark else { return nil }
+
+    // Prefer "Neighborhood, State" → "City, State" → "Country" in that
+    // order. That matches how a human would label a note.
+    if let neighborhood = p.subLocality, let admin = p.administrativeArea {
+      return "\(neighborhood), \(admin)"
+    }
+    if let city = p.locality, let admin = p.administrativeArea {
+      return "\(city), \(admin)"
+    }
+    if let city = p.locality {
+      return city
+    }
+    return p.country
+  }
+
+  @available(iOS 26.0, *)
+  private func mapKitReverseGeocode(_ location: CLLocation) async -> CLPlacemark? {
+    guard let request = MKReverseGeocodingRequest(location: location) else {
+      return nil
+    }
+    do {
+      let mapItems = try await request.mapItems
+      // MKMapItem.placemark is an MKPlacemark, which is a CLPlacemark
+      // subclass — existing callers that read CLPlacemark fields work
+      // unchanged.
+      return mapItems.first?.placemark
+    } catch {
+      return nil
+    }
+  }
+
+  private func legacyReverseGeocode(_ location: CLLocation) async -> CLPlacemark? {
     do {
       let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
-      guard let p = placemarks.first else { return nil }
-      // Prefer "Neighborhood, State" → "City, State" → "Country" in that
-      // order. That matches how a human would label a note.
-      if let neighborhood = p.subLocality, let admin = p.administrativeArea {
-        return "\(neighborhood), \(admin)"
-      }
-      if let city = p.locality, let admin = p.administrativeArea {
-        return "\(city), \(admin)"
-      }
-      if let city = p.locality {
-        return city
-      }
-      return p.country
+      return placemarks.first
     } catch {
       return nil
     }

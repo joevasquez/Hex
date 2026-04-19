@@ -9,6 +9,7 @@ import AVFoundation
 import Combine
 import HexCore
 import SwiftUI
+import UIKit
 import WhisperKit
 
 @MainActor
@@ -44,15 +45,14 @@ final class RecordingViewModel: ObservableObject {
 
   func toggleRecording(
     model: String,
-    aiEnabled: Bool,
     mode: AIProcessingMode,
     provider: AIProvider
   ) async {
     switch phase {
     case .idle, .done, .error:
-      await startRecording(model: model, aiEnabled: aiEnabled, mode: mode, provider: provider)
+      await startRecording(model: model, mode: mode, provider: provider)
     case .recording:
-      await stopAndProcess(model: model, aiEnabled: aiEnabled, mode: mode, provider: provider)
+      await stopAndProcess(model: model, mode: mode, provider: provider)
     default:
       break
     }
@@ -60,7 +60,6 @@ final class RecordingViewModel: ObservableObject {
 
   private func startRecording(
     model: String,
-    aiEnabled: Bool,
     mode: AIProcessingMode,
     provider: AIProvider
   ) async {
@@ -78,6 +77,7 @@ final class RecordingViewModel: ObservableObject {
       _ = try recorder.startRecording()
       recordingStartedAt = Date()
       phase = .recording
+      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 
       // Meter + elapsed timer
       timerTask?.cancel()
@@ -98,13 +98,13 @@ final class RecordingViewModel: ObservableObject {
 
   private func stopAndProcess(
     model: String,
-    aiEnabled: Bool,
     mode: AIProcessingMode,
     provider: AIProvider
   ) async {
     timerTask?.cancel()
     let url = recorder.stopRecording()
     phase = .transcribing
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
 
     guard let url else {
       phase = .error("Recording file was not produced")
@@ -112,7 +112,6 @@ final class RecordingViewModel: ObservableObject {
     }
 
     do {
-      // Load WhisperKit (lazy; first call downloads the model)
       if whisperKit == nil || whisperKit?.modelFolder?.lastPathComponent != model {
         whisperKit = try await WhisperKit(
           WhisperKitConfig(model: model, download: true)
@@ -123,7 +122,6 @@ final class RecordingViewModel: ObservableObject {
       let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
       rawTranscript = text
 
-      // Clean up temp file
       try? FileManager.default.removeItem(at: url)
 
       if text.isEmpty {
@@ -131,18 +129,17 @@ final class RecordingViewModel: ObservableObject {
         return
       }
 
-      // Optional AI processing
-      if aiEnabled {
+      if mode != .off {
         phase = .aiProcessing
         do {
           processedTranscript = try await AIProcessingClient.liveValue.process(text, mode, provider, nil)
         } catch {
-          // AI failure is non-fatal — just show raw
           processedTranscript = ""
         }
       }
 
       phase = .done
+      UINotificationFeedbackGenerator().notificationOccurred(.success)
     } catch {
       phase = .error("Transcription failed: \(error.localizedDescription)")
     }
@@ -151,12 +148,12 @@ final class RecordingViewModel: ObservableObject {
 
 struct ContentView: View {
   @AppStorage(QuillIOSSettingsKey.selectedModel) private var selectedModel: String = QuillIOSSettingsKey.defaultModel
-  @AppStorage(QuillIOSSettingsKey.aiProcessingEnabled) private var aiEnabled: Bool = false
   @AppStorage(QuillIOSSettingsKey.aiProcessingMode) private var aiModeRaw: String = QuillIOSSettingsKey.defaultMode
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
 
   @StateObject private var vm = RecordingViewModel()
   @State private var showingSettings = false
+  @State private var idlePulse = false
 
   private var aiMode: AIProcessingMode {
     AIProcessingMode(rawValue: aiModeRaw) ?? .clean
@@ -168,27 +165,78 @@ struct ContentView: View {
 
   var body: some View {
     NavigationStack {
-      ScrollView {
-        VStack(spacing: 24) {
-          recordButton
-          statusLabel
-          resultArea
+      ZStack {
+        backgroundGradient
+          .ignoresSafeArea()
+
+        ScrollView {
+          VStack(spacing: 28) {
+            modeChipRow
+            recordButton
+            statusLabel
+            resultArea
+            Spacer(minLength: 40)
+          }
+          .padding(.horizontal)
+          .padding(.top, 8)
         }
-        .padding()
       }
       .navigationTitle("Quill")
+      .navigationBarTitleDisplayMode(.large)
       .toolbar {
-        Button {
-          showingSettings = true
-        } label: {
-          Image(systemName: "gearshape")
+        ToolbarItem(placement: .topBarTrailing) {
+          Button {
+            showingSettings = true
+          } label: {
+            Image(systemName: "gearshape")
+              .font(.title3)
+          }
         }
       }
       .sheet(isPresented: $showingSettings) {
         SettingsView()
       }
+      .onAppear { idlePulse = true }
     }
   }
+
+  // MARK: - Background
+
+  private var backgroundGradient: some View {
+    LinearGradient(
+      colors: [
+        Color.purple.opacity(0.08),
+        Color.blue.opacity(0.04),
+        Color(.systemBackground),
+      ],
+      startPoint: .topLeading,
+      endPoint: .bottomTrailing
+    )
+  }
+
+  // MARK: - Mode chips
+
+  @ViewBuilder
+  private var modeChipRow: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        ForEach(AIProcessingMode.allCases, id: \.rawValue) { mode in
+          ModeChip(
+            mode: mode,
+            isSelected: mode == aiMode,
+            action: {
+              UISelectionFeedbackGenerator().selectionChanged()
+              aiModeRaw = mode.rawValue
+            }
+          )
+        }
+      }
+      .padding(.horizontal, 4)
+    }
+    .scrollClipDisabled()
+  }
+
+  // MARK: - Record button
 
   @ViewBuilder
   private var recordButton: some View {
@@ -200,22 +248,44 @@ struct ContentView: View {
       }
     }()
 
+    let buttonTint: Color = isRecording ? .red : (aiMode == .off ? .blue : .purple)
+    let level = CGFloat(vm.meterLevel)
+
     Button {
       Task {
         await vm.toggleRecording(
           model: selectedModel,
-          aiEnabled: aiEnabled,
           mode: aiMode,
           provider: aiProvider
         )
       }
     } label: {
       ZStack {
+        // Outer glow — reacts to audio when recording, breathes when idle
         Circle()
-          .fill(isRecording ? Color.red : Color.purple)
+          .fill(buttonTint.opacity(isRecording ? 0.25 + level * 0.5 : 0.15))
+          .frame(width: 220, height: 220)
+          .blur(radius: 20)
+          .scaleEffect(isRecording ? 1.0 + level * 0.3 : (idlePulse ? 1.05 : 0.95))
+          .animation(.easeInOut(duration: 0.2), value: level)
+          .animation(
+            .easeInOut(duration: 1.8).repeatForever(autoreverses: true),
+            value: idlePulse
+          )
+
+        // Main circle
+        Circle()
+          .fill(
+            LinearGradient(
+              colors: [buttonTint, buttonTint.opacity(0.75)],
+              startPoint: .topLeading,
+              endPoint: .bottomTrailing
+            )
+          )
           .frame(width: 160, height: 160)
-          .scaleEffect(isRecording ? 1.0 + CGFloat(vm.meterLevel) * 0.2 : 1.0)
-          .animation(.easeInOut(duration: 0.15), value: vm.meterLevel)
+          .shadow(color: buttonTint.opacity(0.4), radius: 20, y: 10)
+          .scaleEffect(isRecording ? 1.0 + level * 0.12 : 1.0)
+          .animation(.easeInOut(duration: 0.15), value: level)
 
         if isBusy {
           ProgressView()
@@ -225,101 +295,197 @@ struct ContentView: View {
           Image(systemName: isRecording ? "stop.fill" : "mic.fill")
             .font(.system(size: 56, weight: .medium))
             .foregroundStyle(.white)
+            .symbolEffect(.bounce, value: isRecording)
         }
       }
     }
+    .buttonStyle(.plain)
     .disabled(isBusy)
-    .padding(.top, 40)
+    .padding(.top, 20)
   }
+
+  // MARK: - Status
 
   @ViewBuilder
   private var statusLabel: some View {
-    switch vm.phase {
-    case .idle:
-      Text("Tap to record")
-        .font(.headline)
-        .foregroundStyle(.secondary)
-    case .requestingPermission:
-      Text("Requesting microphone permission...")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-    case .recording:
-      Text(String(format: "Recording %.1fs", vm.elapsedSeconds))
-        .font(.headline)
-        .foregroundStyle(.red)
-        .monospacedDigit()
-    case .transcribing:
-      Text("Transcribing...")
-        .font(.subheadline)
-        .foregroundStyle(.blue)
-    case .aiProcessing:
-      Text("Enhancing with AI...")
-        .font(.subheadline)
-        .foregroundStyle(.purple)
-    case .done:
-      EmptyView()
-    case .error(let msg):
-      Label(msg, systemImage: "exclamationmark.triangle")
-        .font(.subheadline)
-        .foregroundStyle(.red)
-        .multilineTextAlignment(.center)
+    Group {
+      switch vm.phase {
+      case .idle:
+        VStack(spacing: 4) {
+          Text("Tap to record")
+            .font(.headline)
+            .foregroundStyle(.secondary)
+          Text(aiMode == .off ? "Raw transcript" : "\(aiMode.displayName) · \(aiProvider.displayName)")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+        }
+      case .requestingPermission:
+        Text("Requesting microphone permission…")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+      case .recording:
+        Text(formatElapsed(vm.elapsedSeconds))
+          .font(.system(size: 28, weight: .semibold, design: .rounded))
+          .foregroundStyle(.red)
+          .monospacedDigit()
+      case .transcribing:
+        Label("Transcribing…", systemImage: "waveform")
+          .font(.subheadline)
+          .foregroundStyle(.blue)
+      case .aiProcessing:
+        Label("Enhancing with \(aiProvider.displayName)…", systemImage: "sparkles")
+          .font(.subheadline)
+          .foregroundStyle(.purple)
+      case .done:
+        EmptyView()
+      case .error(let msg):
+        Label(msg, systemImage: "exclamationmark.triangle")
+          .font(.subheadline)
+          .foregroundStyle(.red)
+          .multilineTextAlignment(.center)
+          .padding(.horizontal)
+      }
     }
+    .frame(minHeight: 44)
   }
+
+  private func formatElapsed(_ seconds: TimeInterval) -> String {
+    let m = Int(seconds) / 60
+    let s = Int(seconds) % 60
+    let cs = Int((seconds - floor(seconds)) * 10)
+    return String(format: "%02d:%02d.%d", m, s, cs)
+  }
+
+  // MARK: - Result
 
   @ViewBuilder
   private var resultArea: some View {
     if vm.hasResult {
-      VStack(alignment: .leading, spacing: 16) {
-        if aiEnabled && !vm.processedTranscript.isEmpty {
-          VStack(alignment: .leading, spacing: 8) {
-            HStack {
-              Label("\(aiMode.displayName) mode", systemImage: "sparkles")
-                .font(.caption)
-                .foregroundStyle(.purple)
-              Spacer()
-            }
-            Text(vm.processedTranscript)
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .padding()
-              .background(Color.purple.opacity(0.1))
-              .cornerRadius(12)
-          }
+      VStack(alignment: .leading, spacing: 14) {
+        if aiMode != .off && !vm.processedTranscript.isEmpty {
+          resultCard(
+            title: "\(aiMode.displayName) mode",
+            icon: "sparkles",
+            tint: .purple,
+            text: vm.processedTranscript
+          )
 
-          DisclosureGroup("Raw transcript") {
+          DisclosureGroup {
             Text(vm.rawTranscript)
               .textSelection(.enabled)
+              .font(.footnote)
               .foregroundStyle(.secondary)
               .frame(maxWidth: .infinity, alignment: .leading)
               .padding(.top, 8)
+          } label: {
+            Label("Raw transcript", systemImage: "waveform")
+              .font(.footnote)
+              .foregroundStyle(.secondary)
           }
-          .font(.caption)
+          .padding(.horizontal, 4)
         } else {
-          Text(vm.rawTranscript)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(12)
+          resultCard(
+            title: "Transcript",
+            icon: "waveform",
+            tint: .blue,
+            text: vm.rawTranscript
+          )
         }
 
         HStack(spacing: 12) {
           ShareLink(item: vm.displayedText) {
             Label("Share", systemImage: "square.and.arrow.up")
               .frame(maxWidth: .infinity)
+              .padding(.vertical, 4)
           }
           .buttonStyle(.borderedProminent)
-          .tint(.purple)
+          .tint(aiMode == .off ? .blue : .purple)
 
           Button {
             UIPasteboard.general.string = vm.displayedText
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
           } label: {
             Label("Copy", systemImage: "doc.on.doc")
               .frame(maxWidth: .infinity)
+              .padding(.vertical, 4)
           }
           .buttonStyle(.bordered)
         }
       }
+      .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+  }
+
+  private func resultCard(title: String, icon: String, tint: Color, text: String) -> some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack {
+        Label(title, systemImage: icon)
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(tint)
+        Spacer()
+      }
+      Text(text)
+        .textSelection(.enabled)
+        .font(.body)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .padding(16)
+    .background(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .fill(tint.opacity(0.08))
+        .overlay(
+          RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(tint.opacity(0.15), lineWidth: 1)
+        )
+    )
+  }
+}
+
+// MARK: - Mode chip
+
+private struct ModeChip: View {
+  let mode: AIProcessingMode
+  let isSelected: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 6) {
+        Image(systemName: iconName)
+          .font(.caption.weight(.semibold))
+        Text(mode == .off ? "Raw" : mode.displayName)
+          .font(.subheadline.weight(.medium))
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 8)
+      .background(
+        Capsule()
+          .fill(isSelected ? tint : Color.secondary.opacity(0.12))
+      )
+      .foregroundStyle(isSelected ? Color.white : Color.primary)
+      .overlay(
+        Capsule()
+          .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.2), lineWidth: 1)
+      )
+    }
+    .buttonStyle(.plain)
+  }
+
+  private var iconName: String {
+    switch mode {
+    case .off: "waveform"
+    case .clean: "sparkles"
+    case .email: "envelope"
+    case .notes: "list.bullet"
+    case .message: "bubble.left"
+    case .code: "chevron.left.forwardslash.chevron.right"
+    }
+  }
+
+  private var tint: Color {
+    switch mode {
+    case .off: .blue
+    default: .purple
     }
   }
 }

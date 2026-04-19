@@ -2,7 +2,8 @@
 //  SettingsView.swift
 //  Quill (iOS)
 //
-//  iOS settings: transcription model, AI provider/mode/API key.
+//  iOS settings: transcription model, AI provider, API keys. AI mode is
+//  chosen on the main screen via the chip row.
 //
 
 import HexCore
@@ -12,15 +13,12 @@ struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
 
   @AppStorage(QuillIOSSettingsKey.selectedModel) private var selectedModel: String = QuillIOSSettingsKey.defaultModel
-  @AppStorage(QuillIOSSettingsKey.aiProcessingEnabled) private var aiEnabled: Bool = false
-  @AppStorage(QuillIOSSettingsKey.aiProcessingMode) private var aiModeRaw: String = QuillIOSSettingsKey.defaultMode
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
 
   @State private var apiKeyText: String = ""
   @State private var isAPIKeyVisible: Bool = false
   @State private var apiKeySaved: Bool = false
 
-  // Available models for iOS
   private let availableModels: [(id: String, name: String, size: String)] = [
     ("openai_whisper-tiny.en", "Whisper Tiny (English)", "~75 MB"),
     ("openai_whisper-tiny", "Whisper Tiny (Multilingual)", "~75 MB"),
@@ -48,61 +46,47 @@ struct SettingsView: View {
             .foregroundStyle(.secondary)
         }
 
-        Section("AI Enhancement") {
-          Toggle("Enable AI Clean-up", isOn: $aiEnabled)
-
-          if aiEnabled {
-            Picker("Mode", selection: $aiModeRaw) {
-              ForEach(AIProcessingMode.allCases.filter { $0 != .off }, id: \.rawValue) { mode in
-                Text(mode.displayName).tag(mode.rawValue)
-              }
-            }
-
-            Text(currentMode.description)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-
-            Picker("Provider", selection: $aiProviderRaw) {
-              ForEach(AIProvider.allCases, id: \.rawValue) { provider in
-                Text(provider.displayName).tag(provider.rawValue)
-              }
+        Section {
+          Picker("Provider", selection: $aiProviderRaw) {
+            ForEach(AIProvider.allCases, id: \.rawValue) { provider in
+              Text(provider.displayName).tag(provider.rawValue)
             }
           }
+        } header: {
+          Text("AI Provider")
+        } footer: {
+          Text("Choose your AI mode on the main screen. The provider is used whenever a non-Raw mode is selected.")
         }
 
-        if aiEnabled {
-          Section("API Key") {
-            HStack {
-              if isAPIKeyVisible {
-                TextField("API Key", text: $apiKeyText)
-                  .textInputAutocapitalization(.never)
-                  .autocorrectionDisabled()
-              } else {
-                SecureField("API Key", text: $apiKeyText)
-              }
-              Button {
-                isAPIKeyVisible.toggle()
-              } label: {
-                Image(systemName: isAPIKeyVisible ? "eye.slash" : "eye")
-              }
-              .buttonStyle(.borderless)
+        Section {
+          HStack {
+            if isAPIKeyVisible {
+              TextField("API Key", text: $apiKeyText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            } else {
+              SecureField("API Key", text: $apiKeyText)
             }
+            Button {
+              isAPIKeyVisible.toggle()
+            } label: {
+              Image(systemName: isAPIKeyVisible ? "eye.slash" : "eye")
+            }
+            .buttonStyle(.borderless)
+          }
 
-            Button("Save Key") {
-              saveKey()
-            }
+          Button("Save Key") { saveKey() }
             .disabled(apiKeyText.isEmpty)
 
-            if apiKeySaved {
-              Label("Saved to Keychain", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.caption)
-            }
-
-            Text("Get an API key from \(currentProvider == .openAI ? "platform.openai.com" : "console.anthropic.com"). Stored securely in Keychain; never leaves your device except when you make an API call.")
+          if apiKeySaved {
+            Label("Saved to Keychain", systemImage: "checkmark.circle.fill")
+              .foregroundStyle(.green)
               .font(.caption)
-              .foregroundStyle(.secondary)
           }
+        } header: {
+          Text("\(currentProvider.displayName) API Key")
+        } footer: {
+          Text("Get an API key from \(currentProvider == .openAI ? "platform.openai.com" : "console.anthropic.com"). Stored securely in the device Keychain; never leaves your device except when you make an API call.")
         }
 
         Section("About") {
@@ -125,10 +109,6 @@ struct SettingsView: View {
         loadKey()
       }
     }
-  }
-
-  private var currentMode: AIProcessingMode {
-    AIProcessingMode(rawValue: aiModeRaw) ?? .clean
   }
 
   private var currentProvider: AIProvider {

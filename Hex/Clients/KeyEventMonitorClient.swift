@@ -380,6 +380,13 @@ class KeyEventMonitorClientLive {
         options: .defaultTap,
         eventsOfInterest: CGEventMask(eventMask),
         callback: { _, type, cgEvent, userInfo in
+          // Watchdog: if the tap callback takes longer than ~50ms, macOS is at
+          // risk of firing .tapDisabledByTimeout (default ~1s, but even the low
+          // tens of ms will stutter user input). Log any callback that crosses
+          // the threshold so we can trace which handler is slow without having
+          // to repro the lockup live.
+          let tapStart = DispatchTime.now().uptimeNanoseconds
+
           guard
             let hotKeyClientLive = Unmanaged<KeyEventMonitorClientLive>
             .fromOpaque(userInfo!)
@@ -399,6 +406,7 @@ class KeyEventMonitorClientLive {
 
           if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
             _ = hotKeyClientLive.processInputEvent(.mouseClick)
+            KeyEventMonitorClientLive.logIfSlow(tapStart: tapStart, stage: "mouseClick", type: type)
             return Unmanaged.passUnretained(cgEvent)
           }
 
@@ -408,6 +416,7 @@ class KeyEventMonitorClientLive {
           let handledByKeyHandler = hotKeyClientLive.processKeyEvent(keyEvent)
           let handledByInputHandler = hotKeyClientLive.processInputEvent(.keyboard(keyEvent))
 
+          KeyEventMonitorClientLive.logIfSlow(tapStart: tapStart, stage: "keyEvent", type: type)
           return (handledByKeyHandler || handledByInputHandler) ? nil : Unmanaged.passUnretained(cgEvent)
         },
         userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
@@ -459,10 +468,45 @@ class KeyEventMonitorClientLive {
     _ event: T,
     handlers: [UUID: @Sendable (T) -> Bool]
   ) -> Bool {
-    let handlerList = queue.sync { Array(handlers.values) }
-    return handlerList.reduce(false) { handled, handler in
-      handler(event) || handled
+    // Snapshot handlers under the queue lock. We also time this because a
+    // contended @Shared or barrier write elsewhere could keep us waiting here.
+    let snapshotStart = DispatchTime.now().uptimeNanoseconds
+    let handlerList: [(UUID, @Sendable (T) -> Bool)] =
+      queue.sync { Array(handlers.map { ($0.key, $0.value) }) }
+    Self.logIfSlow(tapStart: snapshotStart, stage: "handler-snapshot", type: nil, threshold: 10)
+
+    var result = false
+    for (uuid, handler) in handlerList {
+      let handlerStart = DispatchTime.now().uptimeNanoseconds
+      let handled = handler(event)
+      Self.logIfSlow(
+        tapStart: handlerStart,
+        stage: "handler=\(uuid.uuidString.prefix(8))",
+        type: nil,
+        threshold: 20
+      )
+      result = handled || result
     }
+    return result
+  }
+
+  /// Logs an error-level message if the elapsed time since `tapStart` exceeds
+  /// `threshold` milliseconds. The CGEvent tap is on the main run loop, so any
+  /// slow path here directly starves user input. 50ms is generous for what
+  /// should be microsecond-scale work.
+  fileprivate static func logIfSlow(
+    tapStart: UInt64,
+    stage: String,
+    type: CGEventType?,
+    threshold: Double = 50
+  ) {
+    let elapsedNs = DispatchTime.now().uptimeNanoseconds &- tapStart
+    let elapsedMs = Double(elapsedNs) / 1_000_000
+    guard elapsedMs >= threshold else { return }
+    let typeDesc = type.map { "\($0.rawValue)" } ?? "-"
+    logger.error(
+      "CGEvent tap slow path: stage=\(stage, privacy: .public) type=\(typeDesc, privacy: .public) elapsed=\(String(format: "%.1f", elapsedMs), privacy: .public)ms"
+    )
   }
 
   private func processKeyEvent(_ keyEvent: KeyEvent) -> Bool {

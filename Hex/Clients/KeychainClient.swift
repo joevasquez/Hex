@@ -53,61 +53,39 @@ enum KeychainKey {
 private struct KeychainClientLive {
   private let service = "com.joevasquez.Quill"
 
-  /// Build a CFDictionary query using CFMutableDictionary to avoid any Swift bridging
-  /// edge cases with `[String: Any]` → CFDictionary. This defensively ensures no
-  /// values are nil before the query reaches Security.framework.
-  private func makeQuery(
-    account: String,
-    extras: [(CFString, CFTypeRef)] = []
-  ) -> CFDictionary? {
-    guard !account.isEmpty else { return nil }
-
-    let query = CFDictionaryCreateMutable(
-      kCFAllocatorDefault,
-      0,
-      nil,  // keys unretained (CFString constants)
-      nil   // values unretained
-    )!
-
-    // Required fields
-    CFDictionarySetValue(query, Unmanaged.passUnretained(kSecClass).toOpaque(),
-                         Unmanaged.passUnretained(kSecClassGenericPassword).toOpaque())
-    CFDictionarySetValue(query, Unmanaged.passUnretained(kSecAttrService).toOpaque(),
-                         Unmanaged.passUnretained(service as CFString).toOpaque())
-    CFDictionarySetValue(query, Unmanaged.passUnretained(kSecAttrAccount).toOpaque(),
-                         Unmanaged.passUnretained(account as CFString).toOpaque())
-
-    // iOS requires kSecAttrAccessible; macOS uses it as a hint.
-    // "WhenUnlockedThisDeviceOnly" means: only readable when the device is unlocked,
-    // and never synced to iCloud or backed up — correct for API keys.
-    CFDictionarySetValue(query,
-                         Unmanaged.passUnretained(kSecAttrAccessible).toOpaque(),
-                         Unmanaged.passUnretained(kSecAttrAccessibleWhenUnlockedThisDeviceOnly).toOpaque())
-
-    for (cfKey, cfValue) in extras {
-      CFDictionarySetValue(query,
-                           Unmanaged.passUnretained(cfKey).toOpaque(),
-                           Unmanaged.passUnretained(cfValue).toOpaque())
-    }
-
-    return query
+  /// Build the base query dictionary. Uses the standard `[String: Any] as
+  /// CFDictionary` bridge — the Swift runtime wraps values in a toll-free
+  /// bridge that correctly retains them for the lifetime of the dictionary.
+  /// (An earlier version of this file used `CFDictionaryCreateMutable` with
+  /// `nil` retain callbacks to "avoid bridging edge cases"; that was the
+  /// wrong call — `nil` callbacks mean the dictionary does NOT retain its
+  /// values, so the `CFData` for `kSecValueData` was being deallocated
+  /// before `SecItemAdd` read it, which crashed inside `CFGetTypeID` with
+  /// a pointer-auth trap.)
+  private func baseQuery(account: String) -> [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecAttrAccount as String: account,
+      // Required on iOS (sets the item's protection class); a safe hint on
+      // macOS. "WhenUnlockedThisDeviceOnly" = readable only while the device
+      // is unlocked, and never synced to iCloud or included in backups —
+      // appropriate for API keys.
+      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+    ]
   }
 
   func save(key: String, value: String) throws {
     guard !key.isEmpty else { return }
     guard let data = value.data(using: .utf8) else { return }
 
-    // Delete any existing item first (safely — ignore result)
+    // Delete any existing item first so SecItemAdd doesn't collide.
     delete(key: key)
 
-    guard let query = makeQuery(
-      account: key,
-      extras: [(kSecValueData, data as CFData)]
-    ) else {
-      throw KeychainError.invalidInput
-    }
+    var query = baseQuery(account: key)
+    query[kSecValueData as String] = data
 
-    let status = SecItemAdd(query, nil)
+    let status = SecItemAdd(query as CFDictionary, nil)
     guard status == errSecSuccess else {
       throw KeychainError.saveFailed(status)
     }
@@ -116,17 +94,12 @@ private struct KeychainClientLive {
   func read(key: String) -> String? {
     guard !key.isEmpty else { return nil }
 
-    let trueValue = kCFBooleanTrue!
-    guard let query = makeQuery(
-      account: key,
-      extras: [
-        (kSecReturnData, trueValue),
-        (kSecMatchLimit, kSecMatchLimitOne),
-      ]
-    ) else { return nil }
+    var query = baseQuery(account: key)
+    query[kSecReturnData as String] = kCFBooleanTrue
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
 
     var result: AnyObject?
-    let status = SecItemCopyMatching(query, &result)
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
 
     guard status == errSecSuccess,
           let data = result as? Data,
@@ -134,27 +107,22 @@ private struct KeychainClientLive {
     else {
       return nil
     }
-
     return string
   }
 
   func delete(key: String) {
     guard !key.isEmpty else { return }
-    guard let query = makeQuery(account: key) else { return }
-    SecItemDelete(query)
+    SecItemDelete(baseQuery(account: key) as CFDictionary)
   }
 }
 
 private enum KeychainError: LocalizedError {
   case saveFailed(OSStatus)
-  case invalidInput
 
   var errorDescription: String? {
     switch self {
     case .saveFailed(let status):
       "Failed to save to Keychain (status: \(status))"
-    case .invalidInput:
-      "Invalid Keychain input"
     }
   }
 }

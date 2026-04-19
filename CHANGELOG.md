@@ -2,10 +2,30 @@
 
 ## 0.8.0 — Quill
 
-- Renamed project from Hex to **Quill**; new bundle identifier `com.joevasquez.Quill`, new purple/indigo feather icon, copyright updated to Joe Vasquez.
-- Added **Quill iOS app** (standalone) — record, transcribe with Whisper, optionally clean up via AI, share via iOS share sheet. Week-1 MVP — no keyboard extension yet.
-- Made `HexCore` package cross-platform (iOS 16+ and macOS 15+). macOS-only files (hotkey processing, permissions, sleep management, settings) are gated with `#if os(macOS)`.
-- See `QuilliOS/SETUP.md` for instructions to wire the iOS target into Xcode.
+Quill is a rebrand of Hex under new stewardship — same on-device dictation, new name, and a meaningful new capability set.
+
+### Rebrand
+
+- Project renamed from **Hex** to **Quill**; new bundle identifier `com.joevasquez.Quill`, new menu bar icon (feather), updated copyright and About screen. Existing Hex users see Quill as a separate app with its own settings.
+
+### New features
+
+- **AI post-processing** — transform transcripts with OpenAI or Anthropic using one of six modes: Clean (grammar + punctuation), Email, Notes (bullets), Message (casual), Code (comments/docs), or Off. Bring your own API key; stored in the macOS Keychain.
+- **Context-aware mode selection** — per-app rules assign a default AI mode based on the frontmost app (e.g. Mail → Email, Slack → Message, VS Code → Code). Configurable in Settings.
+- **Voice commands** — phrases like "new paragraph", "period", "select all", and "undo" are detected inline and executed as editing commands instead of being pasted as text.
+- **File transcription** — drag audio or video files into the History view to transcribe them to text.
+- **Quill iOS companion app** — standalone iOS app for voice notes on the go. Records on-device with Whisper, optional AI clean-up, share via iOS share sheet. Not bundled with this macOS release.
+
+### Fixes
+
+- Fixed a crash when saving an API key to the Keychain.
+- Fixed Swift 6 concurrency warnings across the macOS target (reduced lock contention on the hotkey hot path).
+- Added watchdog instrumentation to the global hotkey event tap — if a handler ever stalls the tap, a diagnostic log line now identifies which handler instead of silently freezing input.
+
+### Under the hood
+
+- `HexCore` package is now cross-platform (macOS + iOS). macOS-only clients gated with `#if os(macOS)`.
+- Menu bar icon rendered as an SF Symbol template so it respects light/dark menu bar tinting automatically.
 
 ## 0.7.3
 

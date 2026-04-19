@@ -219,14 +219,9 @@ struct ContentView: View {
 
       Text("Quill")
         .font(.system(size: 34, weight: .bold, design: .serif))
-        .foregroundStyle(
-          LinearGradient(
-            colors: [.purple, .blue],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-          )
-        )
+        .foregroundStyle(.white)
         .kerning(0.5)
+        .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
 
       Spacer()
 
@@ -235,41 +230,56 @@ struct ContentView: View {
         showingSettings = true
       } label: {
         Image(systemName: "gearshape")
-          .font(.title3)
-          .foregroundStyle(.secondary)
+          .font(.title3.weight(.semibold))
+          .foregroundStyle(.white)
           .frame(width: 36, height: 36)
           .background(
-            Circle().fill(Color.secondary.opacity(0.12))
+            Circle().fill(Color.white.opacity(0.18))
+          )
+          .overlay(
+            Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
           )
       }
       .buttonStyle(.plain)
     }
     .padding(.horizontal, 20)
     .padding(.vertical, 12)
-    .background(.ultraThinMaterial)
+    .background(
+      LinearGradient(
+        colors: [
+          Color(red: 0.25, green: 0.10, blue: 0.45),  // deep purple
+          Color(red: 0.40, green: 0.20, blue: 0.65),  // brighter mid
+          Color(red: 0.30, green: 0.18, blue: 0.55),  // settled bottom
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+      .ignoresSafeArea(edges: .top)
+    )
     .overlay(alignment: .bottom) {
       Rectangle()
-        .fill(Color.primary.opacity(0.08))
+        .fill(Color.black.opacity(0.25))
         .frame(height: 0.5)
     }
+    .shadow(color: .purple.opacity(0.2), radius: 8, y: 4)
   }
 
   private var logoMark: some View {
     ZStack {
       RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(
+        .fill(Color.white.opacity(0.95))
+        .frame(width: 38, height: 38)
+        .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+
+      Image(systemName: "pencil.tip")
+        .font(.system(size: 20, weight: .semibold))
+        .foregroundStyle(
           LinearGradient(
-            colors: [Color.purple, Color.blue],
+            colors: [Color(red: 0.35, green: 0.15, blue: 0.55), Color(red: 0.25, green: 0.20, blue: 0.60)],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
           )
         )
-        .frame(width: 38, height: 38)
-        .shadow(color: .purple.opacity(0.35), radius: 6, y: 3)
-
-      Image(systemName: "pencil.tip")
-        .font(.system(size: 20, weight: .semibold))
-        .foregroundStyle(.white)
         .rotationEffect(.degrees(-12))
     }
   }

@@ -26,6 +26,8 @@
 	<string>Quill needs microphone access to transcribe your voice notes.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Quill uses live speech recognition to show your words as you speak. The final transcript is produced on-device by Whisper.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Quill tags each new note with your rough location (neighborhood) so you can remember where a thought started. Optional — decline to record notes without a location.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

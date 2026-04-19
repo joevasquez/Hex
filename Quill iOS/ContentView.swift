@@ -170,8 +170,11 @@ struct ContentView: View {
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
 
   @StateObject private var vm = RecordingViewModel()
+  @StateObject private var notes = NotesStore.shared
   @State private var showingSettings = false
+  @State private var showingNotesList = false
   @State private var idlePulse = false
+  @State private var lastAppendedTranscript: String = ""
 
   private var aiMode: AIProcessingMode {
     AIProcessingMode(rawValue: aiModeRaw) ?? .clean
@@ -189,6 +192,7 @@ struct ContentView: View {
 
         VStack(spacing: 0) {
           headerBar
+          activeNoteStrip
 
           ScrollView {
             VStack(spacing: 28) {
@@ -207,7 +211,15 @@ struct ContentView: View {
       .sheet(isPresented: $showingSettings) {
         SettingsView()
       }
+      .sheet(isPresented: $showingNotesList) {
+        NotesListView(store: notes)
+      }
       .onAppear { idlePulse = true }
+      .onChange(of: vm.phase) { _, newPhase in
+        if case .done = newPhase {
+          appendTranscriptToActiveNote()
+        }
+      }
     }
   }
 
@@ -281,6 +293,110 @@ struct ContentView: View {
           )
         )
         .rotationEffect(.degrees(-12))
+    }
+  }
+
+  // MARK: - Active-note strip
+
+  /// Compact row under the header bar showing which note new recordings
+  /// will append to, with controls to start a fresh note or browse all
+  /// notes. Sits on the light gradient background (not the dark header).
+  private var activeNoteStrip: some View {
+    HStack(spacing: 10) {
+      Image(systemName: "note.text")
+        .font(.subheadline)
+        .foregroundStyle(.purple)
+
+      VStack(alignment: .leading, spacing: 1) {
+        Text(notes.activeNote?.displayTitle ?? "No active note")
+          .font(.subheadline.weight(.semibold))
+          .lineLimit(1)
+          .foregroundStyle(.primary)
+        Text(activeNoteSubtitle)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+
+      Spacer()
+
+      Button {
+        UISelectionFeedbackGenerator().selectionChanged()
+        Task {
+          // Capture location when the user explicitly starts a new note.
+          let loc = await LocationClient.shared.currentPlace()
+          _ = notes.startNewNote(location: loc)
+        }
+      } label: {
+        Label("New", systemImage: "square.and.pencil")
+          .labelStyle(.iconOnly)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.purple)
+          .frame(width: 32, height: 32)
+          .background(Circle().fill(Color.purple.opacity(0.12)))
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Start new note")
+
+      Button {
+        UISelectionFeedbackGenerator().selectionChanged()
+        showingNotesList = true
+      } label: {
+        Image(systemName: "list.bullet")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.purple)
+          .frame(width: 32, height: 32)
+          .background(Circle().fill(Color.purple.opacity(0.12)))
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("All notes")
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 10)
+    .background(
+      Rectangle()
+        .fill(.ultraThinMaterial)
+    )
+    .overlay(alignment: .bottom) {
+      Rectangle()
+        .fill(Color.primary.opacity(0.06))
+        .frame(height: 0.5)
+    }
+  }
+
+  private var activeNoteSubtitle: String {
+    if let note = notes.activeNote {
+      var parts: [String] = []
+      if let place = note.location?.placeName {
+        parts.append(place)
+      }
+      parts.append("Updated \(note.updatedAt.quillRelativeFormatted().lowercased())")
+      parts.append("\(note.wordCount) words")
+      return parts.joined(separator: " · ")
+    }
+    return "Tap record to start your first note"
+  }
+
+  // MARK: - Append-on-done
+
+  /// Called whenever the recording VM transitions to .done. Appends the
+  /// final transcript (AI-enhanced if a mode was selected, raw otherwise)
+  /// to the active note, creating a new one with a location tag if none
+  /// exists yet. Guards against double-append by tracking the last
+  /// transcript we consumed.
+  private func appendTranscriptToActiveNote() {
+    let text = vm.displayedText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty, text != lastAppendedTranscript else { return }
+    lastAppendedTranscript = text
+
+    // If we need to create a new note, fetch location first (best-effort).
+    if notes.activeNote == nil {
+      Task {
+        let loc = await LocationClient.shared.currentPlace()
+        notes.appendToActiveNote(text, locationIfCreating: loc)
+      }
+    } else {
+      notes.appendToActiveNote(text, locationIfCreating: nil)
     }
   }
 

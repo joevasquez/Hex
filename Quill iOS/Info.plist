@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Quill</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -12,22 +14,20 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Quill</string>
-	<key>CFBundleDisplayName</key>
-	<string>Quill</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Quill tags each new note with your rough location (neighborhood) so you can remember where a thought started. Optional — decline to record notes without a location.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Quill needs microphone access to transcribe your voice notes.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Quill uses live speech recognition to show your words as you speak. The final transcript is produced on-device by Whisper.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Quill tags each new note with your rough location (neighborhood) so you can remember where a thought started. Optional — decline to record notes without a location.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

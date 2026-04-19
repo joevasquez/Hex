@@ -3,11 +3,15 @@
 //  Quill (iOS)
 //
 //  AVAudioEngine-based recording for iOS. Captures mono 16kHz WAV to a temp file.
+//  Optionally runs a parallel SFSpeechRecognizer for a real-time partial
+//  transcript preview (Apple's on-device model; the authoritative final
+//  transcript is still produced by WhisperKit after stop).
 //
 
 import AVFoundation
 import Combine
 import Foundation
+import Speech
 
 @MainActor
 final class IOSRecordingClient {
@@ -17,6 +21,11 @@ final class IOSRecordingClient {
   private var audioFile: AVAudioFile?
   private var converter: AVAudioConverter?
   private var currentURL: URL?
+
+  // Live preview (SFSpeechRecognizer)
+  private var speechRecognizer: SFSpeechRecognizer?
+  private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
+  private var speechTask: SFSpeechRecognitionTask?
 
   private let targetSampleRate: Double = 16000
   private let targetFormat: AVAudioFormat = {
@@ -30,6 +39,9 @@ final class IOSRecordingClient {
 
   // Audio meter (for UI level indicator)
   @Published private(set) var averagePower: Float = 0
+
+  // Live partial transcript from SFSpeechRecognizer. Resets on each start.
+  @Published private(set) var livePartialTranscript: String = ""
 
   private init() {}
 
@@ -45,7 +57,17 @@ final class IOSRecordingClient {
     }
   }
 
-  func startRecording() throws -> URL {
+  /// Requests speech recognition authorization. Safe to call repeatedly.
+  /// Returns true if the live preview is available; false falls back silently.
+  func requestSpeechPermission() async -> Bool {
+    await withCheckedContinuation { continuation in
+      SFSpeechRecognizer.requestAuthorization { status in
+        continuation.resume(returning: status == .authorized)
+      }
+    }
+  }
+
+  func startRecording(livePreviewEnabled: Bool = true) throws -> URL {
     // Configure session
     let session = AVAudioSession.sharedInstance()
     try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
@@ -56,10 +78,19 @@ final class IOSRecordingClient {
       .appendingPathComponent("quill-recording-\(UUID().uuidString).wav")
     currentURL = url
 
+    // Reset live preview
+    livePartialTranscript = ""
+
     // Build engine
     let engine = AVAudioEngine()
     let inputNode = engine.inputNode
     let inputFormat = inputNode.outputFormat(forBus: 0)
+
+    // Optionally set up SFSpeechRecognizer for live partial transcripts.
+    // Failures here are non-fatal — recording continues without live preview.
+    if livePreviewEnabled {
+      setupLivePreview()
+    }
 
     let audioFile = try AVAudioFile(
       forWriting: url,
@@ -84,7 +115,11 @@ final class IOSRecordingClient {
     inputNode.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buffer, _ in
       guard let self, let converter = self.converter else { return }
 
-      // Convert to 16kHz mono
+      // Feed the native-format buffer to SFSpeechRecognizer for live preview.
+      // SFSpeech accepts the input node's format directly — no conversion needed.
+      Task { @MainActor in self.speechRequest?.append(buffer) }
+
+      // Convert to 16kHz mono for the recorded WAV (what Whisper will transcribe)
       let frameCapacity = AVAudioFrameCount(Double(buffer.frameLength) * (self.targetSampleRate / buffer.format.sampleRate))
       guard let outputBuffer = AVAudioPCMBuffer(
         pcmFormat: self.targetFormat,
@@ -129,7 +164,49 @@ final class IOSRecordingClient {
     audioFile = nil
     converter = nil
     averagePower = 0
+
+    // Tear down live preview
+    speechRequest?.endAudio()
+    speechTask?.cancel()
+    speechTask = nil
+    speechRequest = nil
+    speechRecognizer = nil
+
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     return currentURL
+  }
+
+  // MARK: - Live preview (SFSpeechRecognizer)
+
+  private func setupLivePreview() {
+    // Needs authorization + an available recognizer. If either is missing, we
+    // simply leave `livePartialTranscript` empty and the UI will skip it.
+    guard SFSpeechRecognizer.authorizationStatus() == .authorized else { return }
+
+    let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer()
+    guard let recognizer, recognizer.isAvailable else { return }
+
+    let request = SFSpeechAudioBufferRecognitionRequest()
+    request.shouldReportPartialResults = true
+    // Prefer on-device when supported — keeps the preview private and offline.
+    if recognizer.supportsOnDeviceRecognition {
+      request.requiresOnDeviceRecognition = true
+    }
+
+    self.speechRecognizer = recognizer
+    self.speechRequest = request
+    self.speechTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+      guard let self else { return }
+      if let result {
+        let text = result.bestTranscription.formattedString
+        Task { @MainActor in self.livePartialTranscript = text }
+      }
+      if error != nil || (result?.isFinal ?? false) {
+        Task { @MainActor in
+          self.speechTask = nil
+          self.speechRequest = nil
+        }
+      }
+    }
   }
 }

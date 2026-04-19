@@ -27,6 +27,7 @@ final class RecordingViewModel: ObservableObject {
   @Published var phase: Phase = .idle
   @Published var rawTranscript: String = ""
   @Published var processedTranscript: String = ""
+  @Published var livePartial: String = ""
   @Published var meterLevel: Float = 0
   @Published var elapsedSeconds: TimeInterval = 0
 
@@ -34,6 +35,18 @@ final class RecordingViewModel: ObservableObject {
   private var whisperKit: WhisperKit?
   private var timerTask: Task<Void, Never>?
   private var recordingStartedAt: Date?
+  private var cancellables: Set<AnyCancellable> = []
+
+  init() {
+    // Mirror the recorder's published live partial onto our own @Published so
+    // SwiftUI views observing the VM get live updates during recording.
+    recorder.$livePartialTranscript
+      .receive(on: RunLoop.main)
+      .sink { [weak self] text in
+        self?.livePartial = text
+      }
+      .store(in: &cancellables)
+  }
 
   var displayedText: String {
     processedTranscript.isEmpty ? rawTranscript : processedTranscript
@@ -70,8 +83,13 @@ final class RecordingViewModel: ObservableObject {
       return
     }
 
+    // Speech recognition permission is best-effort; failure just disables the
+    // live preview (Whisper-based final transcript still works).
+    _ = await recorder.requestSpeechPermission()
+
     rawTranscript = ""
     processedTranscript = ""
+    livePartial = ""
 
     do {
       _ = try recorder.startRecording()
@@ -324,10 +342,14 @@ struct ContentView: View {
           .font(.subheadline)
           .foregroundStyle(.secondary)
       case .recording:
-        Text(formatElapsed(vm.elapsedSeconds))
-          .font(.system(size: 28, weight: .semibold, design: .rounded))
-          .foregroundStyle(.red)
-          .monospacedDigit()
+        VStack(spacing: 12) {
+          Text(formatElapsed(vm.elapsedSeconds))
+            .font(.system(size: 28, weight: .semibold, design: .rounded))
+            .foregroundStyle(.red)
+            .monospacedDigit()
+
+          livePartialView
+        }
       case .transcribing:
         Label("Transcribing…", systemImage: "waveform")
           .font(.subheadline)
@@ -347,6 +369,26 @@ struct ContentView: View {
       }
     }
     .frame(minHeight: 44)
+  }
+
+  @ViewBuilder
+  private var livePartialView: some View {
+    if vm.livePartial.isEmpty {
+      Text("Listening…")
+        .font(.subheadline)
+        .foregroundStyle(.tertiary)
+        .italic()
+    } else {
+      Text(vm.livePartial)
+        .font(.body)
+        .foregroundStyle(.secondary)
+        .italic()
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 8)
+        .animation(.easeOut(duration: 0.15), value: vm.livePartial)
+        .transition(.opacity)
+    }
   }
 
   private func formatElapsed(_ seconds: TimeInterval) -> String {

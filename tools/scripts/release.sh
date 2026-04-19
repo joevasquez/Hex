@@ -25,6 +25,16 @@
 
 set -euo pipefail
 
+# Use the full Xcode, not Command Line Tools. Some dev machines have
+# xcode-select pointed at /Library/Developer/CommandLineTools, which
+# can't run xcodebuild. Override for the duration of this script so
+# it works regardless of the user's xcode-select setting.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+  if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+  fi
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build/release"
@@ -129,11 +139,13 @@ xcrun notarytool submit "$DMG_PATH" \
 echo "→ Stapling ticket to DMG..."
 xcrun stapler staple "$DMG_PATH"
 
-# 6. Verify Gatekeeper will accept it
-echo "→ Verifying distribution signature..."
-spctl -a -t open --context context:primary-signature -v "$DMG_PATH" || {
-  echo "⚠️  spctl verification did not pass — check signing/notarization above."
-}
+# 6. Verify the stapled ticket is valid. (spctl with the wrong flag family
+# — e.g. context:primary-signature — reports "no usable signature" on
+# DMGs even when they're correctly notarized, because that flag checks
+# code-signed executables, not disk images. `stapler validate` is the
+# right check for a DMG.)
+echo "→ Verifying stapled notarization ticket..."
+xcrun stapler validate "$DMG_PATH"
 
 # 7. Extract release notes for this version from CHANGELOG.md
 echo "→ Extracting release notes for v$VERSION..."

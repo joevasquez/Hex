@@ -29,13 +29,10 @@ struct HexApp: App {
 				NSApplication.shared.terminate(nil)
 			}.keyboardShortcut("q")
 		} label: {
-			let image: NSImage = {
-				let ratio = $0.size.height / $0.size.width
-				$0.size.height = 18
-				$0.size.width = 18 / ratio
-				return $0
-			}(NSImage(named: "HexIcon")!)
-			Image(nsImage: image)
+			// Quill nib in the menu bar. The SF Symbol renders as a template
+			// image so it picks up the system's menu bar tint (white on dark,
+			// dark on light) automatically. Matches the iOS logo mark.
+			Image(systemName: "feather")
 		}
 
 

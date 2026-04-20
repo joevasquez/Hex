@@ -79,11 +79,14 @@ private struct NotePDFView: View {
       ForEach(Array(NoteContent.segments(from: note.body).enumerated()), id: \.offset) { _, seg in
         switch seg {
         case .text(let t):
-          Text(t)
-            .font(.system(size: 13))
-            .foregroundColor(.black)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
+          NoteTextView(
+            text: t,
+            font: .system(size: 13),
+            textColor: .black,
+            bulletColor: .gray,
+            headingColor: .black
+          )
+          .fixedSize(horizontal: false, vertical: true)
         case .photo(let id):
           VStack(alignment: .leading, spacing: 8) {
             if let ui = PhotoStore.shared.loadImage(noteID: note.id, photoID: id) {

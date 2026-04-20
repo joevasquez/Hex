@@ -195,6 +195,7 @@ struct ContentView: View {
   @State private var renameDraft: String = ""
   @State private var shareRequest: ShareRequest?
   @State private var isBuildingPDF = false
+  @State private var pendingDeleteNoteID: UUID?
 
   private var aiMode: AIProcessingMode {
     AIProcessingMode(rawValue: aiModeRaw) ?? .clean
@@ -214,16 +215,25 @@ struct ContentView: View {
           headerBar
           activeNoteStrip
 
-          ScrollView {
-            VStack(spacing: 20) {
-              modeChipRow
-              resultArea
-              // Reserve space below the note so the floating mic/camera
-              // cluster doesn't overlap the last line or action buttons.
-              Spacer(minLength: 140)
+          ScrollViewReader { proxy in
+            ScrollView {
+              VStack(spacing: 20) {
+                modeChipRow
+                resultArea
+                // Reserve space below the note so the floating mic/camera
+                // cluster doesn't overlap the last line or action buttons.
+                Color.clear.frame(height: 140).id("noteBottom")
+              }
+              .padding(.horizontal)
+              .padding(.top, 16)
             }
-            .padding(.horizontal)
-            .padding(.top, 16)
+            // Animate the outer scroll so the newest transcript/photo
+            // lands just above the FAB cluster rather than off-screen.
+            .onChange(of: notes.activeNote?.body) { _, _ in
+              withAnimation(.easeOut(duration: 0.4)) {
+                proxy.scrollTo("noteBottom", anchor: .bottom)
+              }
+            }
           }
         }
 
@@ -264,6 +274,21 @@ struct ContentView: View {
         Button("Cancel", role: .cancel) {}
       } message: {
         Text("Leave blank to auto-derive from the first line of the note.")
+      }
+      .alert("Delete Note?", isPresented: Binding(
+        get: { pendingDeleteNoteID != nil },
+        set: { if !$0 { pendingDeleteNoteID = nil } }
+      )) {
+        Button("Delete", role: .destructive) {
+          if let id = pendingDeleteNoteID {
+            notes.deleteNote(id: id)
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+          }
+          pendingDeleteNoteID = nil
+        }
+        Button("Cancel", role: .cancel) { pendingDeleteNoteID = nil }
+      } message: {
+        Text("This removes the note and all attached photos. This can't be undone.")
       }
       .sheet(item: $shareRequest) { req in
         ShareSheet(items: req.items)
@@ -778,30 +803,15 @@ struct ContentView: View {
 
         noteShareMenu(for: note, tint: tint)
         noteCopyButton(for: note, tint: tint)
+        noteDeleteButton(for: note)
       }
 
-      ScrollViewReader { proxy in
-        ScrollView {
-          VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
-              segmentView(seg, noteID: note.id)
-            }
-            Color.clear.frame(height: 1).id("noteBottom")
-          }
-          .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxHeight: 360)
-        // Animate the proxy scroll so the newest content slides into view
-        // rather than jumping abruptly when an append lands.
-        .onChange(of: note.body) { _, _ in
-          withAnimation(.easeOut(duration: 0.4)) {
-            proxy.scrollTo("noteBottom", anchor: .bottom)
-          }
-        }
-        .onAppear {
-          proxy.scrollTo("noteBottom", anchor: .bottom)
+      VStack(alignment: .leading, spacing: 12) {
+        ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+          segmentView(seg, noteID: note.id)
         }
       }
+      .frame(maxWidth: .infinity, alignment: .leading)
     }
     .padding(16)
     .background(
@@ -818,10 +828,8 @@ struct ContentView: View {
   private func segmentView(_ seg: NoteSegment, noteID: UUID) -> some View {
     switch seg {
     case .text(let text):
-      Text(text)
+      NoteTextView(text: text, headingColor: .purple)
         .textSelection(.enabled)
-        .font(.body)
-        .frame(maxWidth: .infinity, alignment: .leading)
     case .photo(let photoID):
       VStack(alignment: .leading, spacing: 8) {
         if let ui = PhotoStore.shared.loadImage(noteID: noteID, photoID: photoID) {
@@ -1006,6 +1014,22 @@ struct ContentView: View {
     .disabled(isBuildingPDF)
     .opacity(isBuildingPDF ? 0.5 : 1.0)
     .accessibilityLabel("Share note")
+  }
+
+  private func noteDeleteButton(for note: Note) -> some View {
+    Button {
+      UISelectionFeedbackGenerator().selectionChanged()
+      pendingDeleteNoteID = note.id
+    } label: {
+      Image(systemName: "trash")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.red)
+        .frame(width: 30, height: 30)
+        .background(Circle().fill(Color.red.opacity(0.14)))
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel("Delete note")
   }
 
   private func noteCopyButton(for note: Note, tint: Color) -> some View {

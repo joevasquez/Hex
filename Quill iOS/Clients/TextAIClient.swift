@@ -55,12 +55,17 @@ enum TextAIClient {
     }
     print("TextAIClient: processing \(text.count) chars via \(provider.displayName) mode=\(mode.rawValue)")
 
+    let result: String
     switch provider {
     case .anthropic:
-      return try await callAnthropic(text: text, systemPrompt: mode.systemPrompt, apiKey: key)
+      result = try await callAnthropic(text: text, systemPrompt: mode.systemPrompt, apiKey: key)
     case .openAI:
-      return try await callOpenAI(text: text, systemPrompt: mode.systemPrompt, apiKey: key)
+      result = try await callOpenAI(text: text, systemPrompt: mode.systemPrompt, apiKey: key)
     }
+    print(
+      "TextAIClient: response \(result.count) chars — first 400:\n\(String(result.prefix(400)))\n---"
+    )
+    return result
   }
 
   // MARK: - Anthropic

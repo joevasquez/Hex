@@ -123,27 +123,25 @@ struct SettingsView: View {
   }
 
   private func loadKey() {
-    Task {
-      let existing = await KeychainClient.liveValue.read(keychainKey) ?? ""
-      await MainActor.run {
-        if !existing.isEmpty {
-          apiKeyText = existing
-          apiKeySaved = true
-        }
-      }
+    let (existing, status) = KeychainStore.read(account: keychainKey)
+    print("SettingsView.loadKey(account=\(keychainKey)) status=\(status) found=\(existing != nil)")
+    if let existing, !existing.isEmpty {
+      apiKeyText = existing
+      apiKeySaved = true
+    } else {
+      apiKeyText = ""
+      apiKeySaved = false
     }
   }
 
   private func saveKey() {
     let key = apiKeyText
-    Task {
-      do {
-        try await KeychainClient.liveValue.save(keychainKey, key)
-        await MainActor.run { apiKeySaved = true }
-      } catch {
-        await MainActor.run { apiKeySaved = false }
-      }
-    }
+    guard !key.isEmpty else { return }
+    let status = KeychainStore.save(account: keychainKey, value: key)
+    // Verify round-trip so we never show "Saved" when read would miss.
+    let (roundTrip, readStatus) = KeychainStore.read(account: keychainKey)
+    print("SettingsView.saveKey: save=\(status) readBack=\(readStatus) roundTripLen=\(roundTrip?.count ?? -1)")
+    apiKeySaved = (status == errSecSuccess) && (roundTrip == key)
   }
 }
 

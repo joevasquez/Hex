@@ -38,12 +38,14 @@ struct Note: Codable, Identifiable, Equatable, Hashable {
   }
 
   /// Derive a title from the first meaningful line of body text.
-  /// Used when a user hasn't set a custom title yet.
+  /// Used when a user hasn't set a custom title yet. Photo tokens are
+  /// stripped first so a note that starts with an image still derives
+  /// a sensible title from the surrounding prose.
   static func derivedTitle(from body: String) -> String {
-    let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return "New Note" }
+    let textOnly = NoteContent.stripPhotos(from: body)
+    guard !textOnly.isEmpty else { return "New Note" }
 
-    let firstLine = trimmed.components(separatedBy: .newlines).first ?? trimmed
+    let firstLine = textOnly.components(separatedBy: .newlines).first ?? textOnly
     let words = firstLine.split(separator: " ", omittingEmptySubsequences: true).prefix(6)
     let candidate = words.joined(separator: " ")
     let clipped = String(candidate.prefix(60))
@@ -56,7 +58,12 @@ struct Note: Codable, Identifiable, Equatable, Hashable {
   }
 
   var wordCount: Int {
-    body.split { $0.isWhitespace || $0.isNewline }.count
+    NoteContent.stripPhotos(from: body).split { $0.isWhitespace || $0.isNewline }.count
+  }
+
+  /// Count of inline photos embedded in the note body.
+  var photoCount: Int {
+    NoteContent.photoIDs(in: body).count
   }
 }
 

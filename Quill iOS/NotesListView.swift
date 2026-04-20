@@ -13,6 +13,8 @@ import SwiftUI
 struct NotesListView: View {
   @ObservedObject var store: NotesStore
   @Environment(\.dismiss) private var dismiss
+  @State private var renamingNoteID: UUID?
+  @State private var renameDraft: String = ""
 
   var body: some View {
     NavigationStack {
@@ -35,6 +37,10 @@ struct NotesListView: View {
                     UISelectionFeedbackGenerator().selectionChanged()
                     dismiss()
                   },
+                  onRename: {
+                    renameDraft = note.title
+                    renamingNoteID = note.id
+                  },
                   onDelete: {
                     store.deleteNote(id: note.id)
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
@@ -45,6 +51,21 @@ struct NotesListView: View {
             .padding()
           }
         }
+      }
+      .alert("Rename Note", isPresented: Binding(
+        get: { renamingNoteID != nil },
+        set: { if !$0 { renamingNoteID = nil } }
+      )) {
+        TextField("Title", text: $renameDraft)
+        Button("Save") {
+          if let id = renamingNoteID {
+            store.renameNote(id: id, to: renameDraft.trimmingCharacters(in: .whitespacesAndNewlines))
+          }
+          renamingNoteID = nil
+        }
+        Button("Cancel", role: .cancel) { renamingNoteID = nil }
+      } message: {
+        Text("Leave blank to auto-derive from the first line of the note.")
       }
       .navigationTitle("Notes")
       .navigationBarTitleDisplayMode(.inline)
@@ -73,6 +94,7 @@ private struct NoteRow: View {
   let note: Note
   let isActive: Bool
   let onTap: () -> Void
+  let onRename: () -> Void
   let onDelete: () -> Void
 
   var body: some View {
@@ -99,11 +121,19 @@ private struct NoteRow: View {
           }
 
           if !note.body.isEmpty {
-            Text(note.body)
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-              .lineLimit(2)
-              .multilineTextAlignment(.leading)
+            let preview = NoteContent.stripPhotos(from: note.body)
+            if preview.isEmpty {
+              Label("\(note.photoCount) photo\(note.photoCount == 1 ? "" : "s")",
+                    systemImage: "photo")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            } else {
+              Text(preview)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            }
           } else {
             Text("Empty")
               .font(.subheadline)
@@ -128,6 +158,11 @@ private struct NoteRow: View {
           Text(note.updatedAt.formatted(date: .omitted, time: .shortened))
           Text("·")
           Text("\(note.wordCount) words")
+          if note.photoCount > 0 {
+            Text("·")
+            Image(systemName: "photo")
+            Text("\(note.photoCount)")
+          }
           Spacer()
         }
         .font(.caption)
@@ -155,6 +190,9 @@ private struct NoteRow: View {
     // users expect swipe-to-delete too. Fall back to a long-press menu for
     // consistent discoverability.
     .contextMenu {
+      Button(action: onRename) {
+        Label("Rename", systemImage: "pencil")
+      }
       Button(role: .destructive, action: onDelete) {
         Label("Delete", systemImage: "trash")
       }

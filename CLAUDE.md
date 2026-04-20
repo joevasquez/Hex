@@ -134,24 +134,51 @@ The iOS app lives in the `Quill iOS/` folder (note: folder name has a space — 
 ### Scope
 
 - On-device transcription via WhisperKit (Core ML). No FluidAudio / Parakeet on iOS yet.
-- Optional AI post-processing using the shared `AIProcessingClient` from `HexCore` (OpenAI or Anthropic).
-- API keys stored in the iOS Keychain via the shared cross-platform `KeychainClient`.
-- No hotkeys, no auto-paste, no menu bar. User taps a button → speaks → gets text → shares/copies.
+- AI post-processing of transcripts via `TextAIClient` (Anthropic or OpenAI).
+- Local note store with inline photos; photos are analyzed by a vision model (`PhotoAnalysisClient`).
+- PDF export of a note (text + inline photos + AI analyses).
+- Editable note titles, share menu (text-only or PDF), location-tagged note creation.
+- API keys stored via `KeychainStore` (direct Security-framework calls; see the keychain note below).
+- No hotkeys, no auto-paste, no menu bar. Tap feather mic/camera → speak/snap → get structured note → share/export.
 
 ### Structure
 
 - `QuilliOSApp.swift` — `@main` entry point.
-- `ContentView.swift` — main screen: record button, status, result area with raw + AI-enhanced transcript.
-- `SettingsView.swift` — sheet with model selector, AI toggle/mode/provider, API key field.
-- `QuillIOSSettings.swift` — `@AppStorage` keys and defaults (lives in `UserDefaults`, not `HexSettings`).
-- `Clients/IOSRecordingClient.swift` — `AVAudioRecorder` wrapper with metering and permission handling (iOS equivalent of the macOS `RecordingClient`).
+- `ContentView.swift` — main screen. Purple header with feather logo + list/new/gear buttons, active-note strip (tap title to rename), mode chip row, note canvas with inline photos + AI-analysis cards, floating mic + camera FAB cluster at bottom-right, status pill above it.
+- `SettingsView.swift` — sheet with Whisper model selector, AI provider picker, API key field.
+- `NotesListView.swift` — sheet listing all saved notes with rename/delete.
+- `QuillIOSSettings.swift` — `@AppStorage` keys and defaults.
+- `PhotoPicker.swift` — `PHPickerViewController` (library) and `UIImagePickerController` (camera) wrappers.
+- `ShareSheet.swift` — `UIActivityViewController` wrapper driven by `ShareRequest` (Identifiable items wrapper).
+- `NotePDFExporter.swift` — `ImageRenderer` → `CGContext` PDF of a note, including photo-analysis blocks.
+- `Models/Note.swift` — `id`, `title`, `body` (flat string with inline photo tokens), timestamps, optional `location`. `wordCount` and `displayTitle` strip photo tokens before computing.
+- `Models/NoteContent.swift` — tokenizer. Photos embed as `![photo](<uuid>)` in `body`. `segments(from:)` splits into `.text` / `.photo` segments for rendering; `stripPhotos(from:)` for share/copy/preview.
+- `Models/PhotoAnalysis.swift` — Codable sidecar (`summary`, `keyDetails[]`, optional `transcribedText`, `analyzedAt`, `model`).
+- `Clients/IOSRecordingClient.swift` — `AVAudioRecorder` wrapper with metering and permission handling.
+- `Clients/NotesStore.swift` — JSON-persisted `[Note]` + active-note ID in UserDefaults. Also owns published `photoAnalyses: [UUID: PhotoAnalysis]`, `analyzingPhotoIDs`, `analysisErrors`. Loads analyses from disk on init so views refresh automatically.
+- `Clients/PhotoStore.swift` — persists `Application Support/photos/<note-id>/<photo-id>.jpg` and sidecar `<photo-id>.json`. Downscales to 1568 px long edge at JPEG 0.75 with `UIGraphicsImageRendererFormat.scale = 1` (forcing scale-1 is critical — the default uses the screen scale and re-inflates the image).
+- `Clients/PhotoAnalysisClient.swift` — ships a JPEG to Anthropic or OpenAI with a JSON-only system prompt, parses the structured response. Recompresses on the fly (`compressForVision`) if the on-disk image is over 4 MB (Anthropic caps at 5 MB).
+- `Clients/TextAIClient.swift` — iOS-specific text post-processor. Mirrors the shared macOS `AIProcessingClient` but reads the API key via `KeychainStore` and logs per-call so "AI didn't run" failures are visible.
+- `Clients/KeychainStore.swift` — direct Security-framework helpers (`SecItemAdd` / `SecItemCopyMatching`). See the keychain note below for why this exists.
+- `Clients/LocationClient.swift` — one-shot best-effort reverse geocode used when a note is created.
+
+### Keychain (iOS)
+
+The shared `KeychainClient` (in `Hex/Clients/`) uses `@DependencyClient`, which is unreliable on the iOS target under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`: `save(...)` returned success but nothing was actually persisted, and subsequent reads returned `errSecItemNotFound (-25300)`. **Do not use `KeychainClient.liveValue.save/read` on iOS.** Use `KeychainStore` in `Quill iOS/Clients/` for all keychain access from the iOS app. `KeychainStore` also splits save vs. lookup queries — `kSecAttrAccessible` is applied only on save (it is not a reliable filter on `SecItemCopyMatching`).
+
+### Photo flow
+
+1. Tap camera FAB → confirmation dialog (Take Photo / Choose from Library).
+2. If recording, the dialog first stops recording so the dictated text is committed before the photo lands.
+3. `NotesStore.insertPhotoIntoActiveNote(_:locationIfCreating:)` saves the JPEG and appends a `![photo](<uuid>)` token to the active note's `body`.
+4. `analyzePhoto(noteID:photoID:provider:)` fires in the background — writes a `<photo-id>.json` sidecar and updates `photoAnalyses`. Views refresh automatically.
 
 ### Shared Code via `HexCore`
 
 The iOS target imports `HexCore` for:
-- `AIProcessingMode`, `AIProvider`, `AIProcessingClient` (LLM post-processing).
-- `KeychainClient` (cross-platform wrapper around Security.framework; uses `CFDictionary` queries to avoid Swift bridging issues on iOS).
-- `KeychainKey.openAIAPIKey` / `.anthropicAPIKey` constants.
+- `AIProcessingMode`, `AIProvider` (enums used by `TextAIClient` / `PhotoAnalysisClient`).
+
+`Hex/Clients/KeychainClient.swift` is still included (via the iOS-target file-system-synchronized group exceptions) because `KeychainKey.openAIAPIKey` / `.anthropicAPIKey` constants live there, but iOS code should not call `KeychainClient.liveValue` methods — use `KeychainStore` instead.
 
 macOS-only clients (`SleepManagementClient`, `PermissionClient`) have iOS stub `liveValue`s so `HexCore` compiles for both platforms.
 
@@ -159,11 +186,20 @@ macOS-only clients (`SleepManagementClient`, `PermissionClient`) have iOS stub `
 
 iOS uses `@AppStorage` with plain `UserDefaults` keys (namespaced as `quill.*`), **not** the macOS `HexSettings` struct. Keep the two in sync manually if adding shared settings.
 
-Defaults: model = `openai_whisper-tiny.en`, mode = `clean`, provider = `anthropic`, AI disabled.
+Defaults: model = `openai_whisper-tiny.en`, mode = `off`, provider = `anthropic`.
 
 ### Permissions
 
-Microphone access is requested via `AVAudioApplication.requestRecordPermission`. The prompt string comes from `NSMicrophoneUsageDescription` in `Quill iOS/Info.plist`.
+`Quill iOS/Info.plist` declares:
+- `NSMicrophoneUsageDescription` — recording.
+- `NSSpeechRecognitionUsageDescription` — live partial transcript while recording.
+- `NSCameraUsageDescription` — in-note photos.
+- `NSPhotoLibraryUsageDescription` — library-sourced photos.
+- `NSLocationWhenInUseUsageDescription` — optional, tags new notes with a rough place name.
+
+### Xcode project
+
+The iOS target is a `PBXFileSystemSynchronizedRootGroup` — new files in `Quill iOS/` are auto-included, no `pbxproj` edits needed. Shared files from `Hex/Clients/` are pulled into the iOS target via an explicit `membershipExceptions` list in `project.pbxproj`. Xcode occasionally normalizes bundle-ID quoting in the `pbxproj` on build; revert those with `git checkout -- Hex.xcodeproj/project.pbxproj` to keep diffs clean.
 
 ## Troubleshooting
 

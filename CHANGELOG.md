@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1
+
+### Fixes
+
+- **Menu bar icon restored.** The blank slot some users saw in the menu bar was caused by a reference to an SF Symbol (`feather`) that doesn't exist in Apple's catalog, so the label rendered nothing. The menu bar now uses the same white-feather asset as the app icon, drawn as a proper template `NSImage` so it auto-tints for light and dark menu bars.
+- Stop priming the sound-effects audio engine when sound effects are disabled so Quill avoids unnecessary background audio activity and sleep assertions (#200).
+
 ## 0.8.0 — Quill
 
 Quill is a rebrand of Hex under new stewardship — same on-device dictation, new name, and a meaningful new capability set.

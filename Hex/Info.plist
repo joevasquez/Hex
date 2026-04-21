@@ -4,20 +4,20 @@
 <dict>
 	<key>AudioHardwarePowerHint</key>
 	<string>None</string>
+	<key>CFBundleDisplayName</key>
+	<string>Quill</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>Quill</string>
-	<key>CFBundleDisplayName</key>
-	<string>Quill</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.1</string>
+	<key>CFBundleVersion</key>
+	<string>85</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
-	<key>CFBundleShortVersionString</key>
-	<string>0.8.0</string>
-	<key>CFBundleVersion</key>
-	<string>84</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Quill needs accessibility access to monitor keyboard events for hotkey detection and read surrounding text for AI context.</string>
 	<key>NSAppTransportSecurity</key>

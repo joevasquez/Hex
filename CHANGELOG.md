@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.4
+
+### Fixes
+
+- **AI modes no longer invent content.** The post-processor was adding greetings, closings, and signatures the speaker never dictated — e.g. `"Please suggest times for next week"` came back wrapped in a `Hi,` / `Best,\nJoe` template. Every mode is now strictly cleanup-only: grammar, punctuation, paragraphing, and (for Notes) bullet formatting. Greetings like `Hi Amanda,` and closings like `Best,` are only emitted when the speaker actually dictated them. Two explicit examples in the system prompt show what NOT to do.
+
 ## 0.8.3
 
 ### Fixes

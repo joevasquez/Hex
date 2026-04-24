@@ -176,7 +176,7 @@ struct AIProcessingSectionView: View {
             )
           )
           if store.hexSettings.voiceCommandsEnabled {
-            Text("Say: \"new paragraph\", \"new line\", \"select all\", \"undo\", \"redo\", \"period\", \"comma\"")
+            Text("Inline: \"period\", \"comma\", \"question mark\", \"colon\", \"new paragraph\", \"new line\" become punctuation / breaks mid-sentence. Standalone: say \"select all\", \"undo\", or \"redo\" alone to trigger the editor command.")
               .settingsCaption()
           }
         } icon: {

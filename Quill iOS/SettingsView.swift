@@ -14,6 +14,7 @@ struct SettingsView: View {
 
   @AppStorage(QuillIOSSettingsKey.selectedModel) private var selectedModel: String = QuillIOSSettingsKey.defaultModel
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
+  @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
 
   @State private var apiKeyText: String = ""
   @State private var isAPIKeyVisible: Bool = false
@@ -87,6 +88,14 @@ struct SettingsView: View {
           Text("\(currentProvider.displayName) API Key")
         } footer: {
           Text("Get an API key from \(currentProvider == .openAI ? "platform.openai.com" : "console.anthropic.com"). Stored securely in the device Keychain; never leaves your device except when you make an API call.")
+        }
+
+        Section {
+          Toggle("Inline voice commands", isOn: $voiceCommandsEnabled)
+        } header: {
+          Text("Dictation")
+        } footer: {
+          Text("When on, phrases like \"period\", \"comma\", \"new paragraph\", and \"new line\" are converted to punctuation and line breaks as you dictate — instead of being transcribed literally. Applies before AI cleanup.")
         }
 
         Section("About") {

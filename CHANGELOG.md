@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.2
+
+### New
+
+- **Inline voice commands.** Phrases like `period`, `comma`, `question mark`, `colon`, `semicolon`, `new paragraph`, `new line`, and `full stop` are now converted to punctuation and line breaks *mid-sentence* — not only when spoken alone. So "hello comma world period new paragraph welcome" becomes `Hello, world.\n\nWelcome` before AI post-processing runs. Standalone `undo`, `redo`, and `select all` still trigger the corresponding editor commands. Toggleable under Settings → AI Enhancement → Voice Commands.
+
+### Fixes
+
+- **Paste reliability.** Fixed a race where releasing the record hotkey in a slow-to-respond app (Chrome, Arc, Slack, Electron apps, first paste after launch) could paste your *previous* clipboard contents instead of the transcription. The clipboard restore now waits 1.5 s instead of 500 ms and skips the restore entirely if anything else has written to the clipboard in the meantime.
+
 ## 0.8.1
 
 ### Fixes

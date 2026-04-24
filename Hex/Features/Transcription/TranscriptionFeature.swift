@@ -506,26 +506,44 @@ private extension TranscriptionFeature {
       return .none
     }
 
-    // Voice command detection — check before any text processing
+    // Voice command detection — check before any text processing.
+    // Whole-utterance editor commands (undo / redo / select all) are
+    // executed here and short-circuit the transcript pipeline entirely.
+    // Inline punctuation and structural commands ("period",
+    // "new paragraph", etc.) fall through and get substituted into the
+    // text below so they work mid-sentence, not only as standalone
+    // utterances.
     if state.hexSettings.voiceCommandsEnabled,
-       let command = VoiceCommandDetector.detect(result)
+       let command = VoiceCommandDetector.detect(result),
+       VoiceCommand.editorCommands.contains(command)
     {
       transcriptionFeatureLogger.info("Voice command detected: \(String(describing: command))")
       return executeVoiceCommand(command, audioURL: audioURL)
     }
 
+    // Inline substitution: turn "hello comma world period new paragraph
+    // done" into "Hello, world.\n\nDone" before word remapping and AI
+    // post-processing run. Gated by the same voiceCommandsEnabled
+    // toggle as the standalone detector.
+    let commandResult: String = state.hexSettings.voiceCommandsEnabled
+      ? VoiceCommandSubstituter.substitute(in: result)
+      : result
+    if commandResult != result {
+      transcriptionFeatureLogger.info("Voice command substitutions applied")
+    }
+
     let duration = state.recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
 
-    transcriptionFeatureLogger.info("Raw transcription: '\(result)'")
+    transcriptionFeatureLogger.info("Raw transcription: '\(commandResult)'")
     let remappings = state.hexSettings.wordRemappings
     let removalsEnabled = state.hexSettings.wordRemovalsEnabled
     let removals = state.hexSettings.wordRemovals
     let modifiedResult: String
     if state.isRemappingScratchpadFocused {
-      modifiedResult = result
+      modifiedResult = commandResult
       transcriptionFeatureLogger.info("Scratchpad focused; skipping word modifications")
     } else {
-      var output = result
+      var output = commandResult
       if removalsEnabled {
         let removedResult = WordRemovalApplier.apply(output, removals: removals)
         if removedResult != output {

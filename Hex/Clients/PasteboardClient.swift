@@ -207,27 +207,60 @@ struct PasteboardClientLive {
         let targetChangeCount = writeAndTrackChangeCount(pasteboard: pasteboard, text: text)
         _ = await waitForPasteboardCommit(targetChangeCount: targetChangeCount)
         let pasteSucceeded = await performPaste(text)
-        
+
         // Only restore original pasteboard contents if:
         // 1. Copying to clipboard is disabled AND
         // 2. The paste operation succeeded
         if !hexSettings.copyToClipboard && pasteSucceeded {
             let savedSnapshot = snapshot
             Task { @MainActor in
-                // Give slower apps a short window to read the plain-text entry
-                // before we repopulate the clipboard with the user's previous rich data.
-                try? await Task.sleep(for: .milliseconds(500))
+                // Why this delay is the size it is:
+                //
+                // We posted Cmd+V as a CGEvent to the target app's run
+                // loop; it then processes the keystroke asynchronously
+                // and reads the pasteboard during its paste handler.
+                // The previous 500ms was too short for several common
+                // cases — Chrome / Safari / any Electron app, first
+                // paste after app launch, or any app that defers
+                // keystroke processing through an async layer. When
+                // the restore fired before the target had read the
+                // pasteboard, the target would read back the user's
+                // ORIGINAL clipboard contents and paste those instead
+                // of the transcription.
+                //
+                // 1500ms is conservative without being user-visible —
+                // the transcription is already pasted, we're only
+                // deciding when to put the previous clipboard back.
+                try? await Task.sleep(for: .milliseconds(1500))
+
+                // Don't blindly stomp the pasteboard. If anything has
+                // written to it in the meantime — which could be the
+                // user copying something new, another app running in
+                // the background, or any other tool that manages the
+                // clipboard — skip the restore. Reads do not increment
+                // `changeCount`, so this check only fires on actual
+                // writes, not on the target app successfully
+                // consuming our paste.
+                let currentCount = pasteboard.changeCount
+                guard currentCount == targetChangeCount else {
+                    pasteboardLogger.info(
+                        "Skipping clipboard restore: pasteboard changed after paste (count=\(currentCount), expected=\(targetChangeCount))"
+                    )
+                    return
+                }
+
                 pasteboard.clearContents()
                 savedSnapshot.restore(to: pasteboard)
+                pasteboardLogger.debug("Restored previous clipboard contents after paste")
             }
         }
-        
+
         // If we failed to paste AND user doesn't want clipboard retention,
         // show a notification that text is available in clipboard
         if !pasteSucceeded && !hexSettings.copyToClipboard {
             // Keep the transcribed text in clipboard regardless of setting
             pasteboardLogger.notice("Paste operation failed; text remains in clipboard as fallback.")
-            
+
             // TODO: Could add a notification here to inform user
             // that text is available in clipboard
         }

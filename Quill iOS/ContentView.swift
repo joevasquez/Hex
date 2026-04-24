@@ -62,13 +62,19 @@ final class RecordingViewModel: ObservableObject {
   func toggleRecording(
     model: String,
     mode: AIProcessingMode,
-    provider: AIProvider
+    provider: AIProvider,
+    voiceCommandsEnabled: Bool
   ) async {
     switch phase {
     case .idle, .done, .error:
       await startRecording(model: model, mode: mode, provider: provider)
     case .recording:
-      await stopAndProcess(model: model, mode: mode, provider: provider)
+      await stopAndProcess(
+        model: model,
+        mode: mode,
+        provider: provider,
+        voiceCommandsEnabled: voiceCommandsEnabled
+      )
     default:
       break
     }
@@ -121,7 +127,8 @@ final class RecordingViewModel: ObservableObject {
   private func stopAndProcess(
     model: String,
     mode: AIProcessingMode,
-    provider: AIProvider
+    provider: AIProvider,
+    voiceCommandsEnabled: Bool
   ) async {
     timerTask?.cancel()
     let url = recorder.stopRecording()
@@ -142,7 +149,17 @@ final class RecordingViewModel: ObservableObject {
 
       let results = try await whisperKit!.transcribe(audioPath: url.path)
       let rawText = results.map(\.text).joined(separator: " ")
-      let text = WhisperOutputCleaner.clean(rawText)
+      let cleaned = WhisperOutputCleaner.clean(rawText)
+      // Inline voice-command substitution: "period", "comma",
+      // "new paragraph" → real punctuation / line breaks. Runs before
+      // AI post-processing so downstream modes see properly-punctuated
+      // text. Gated by the user's Settings toggle.
+      let text = voiceCommandsEnabled
+        ? VoiceCommandSubstituter.substitute(in: cleaned)
+        : cleaned
+      if text != cleaned {
+        print("RecordingViewModel: applied voice-command substitutions")
+      }
       rawTranscript = text
 
       try? FileManager.default.removeItem(at: url)
@@ -179,6 +196,7 @@ struct ContentView: View {
   @AppStorage(QuillIOSSettingsKey.selectedModel) private var selectedModel: String = QuillIOSSettingsKey.defaultModel
   @AppStorage(QuillIOSSettingsKey.aiProcessingMode) private var aiModeRaw: String = QuillIOSSettingsKey.defaultMode
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
+  @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
 
   @StateObject private var vm = RecordingViewModel()
   @StateObject private var notes = NotesStore.shared
@@ -314,7 +332,8 @@ struct ContentView: View {
         await vm.toggleRecording(
           model: selectedModel,
           mode: aiMode,
-          provider: aiProvider
+          provider: aiProvider,
+          voiceCommandsEnabled: voiceCommandsEnabled
         )
         showingPhotoSourceDialog = true
       }
@@ -706,7 +725,8 @@ struct ContentView: View {
         await vm.toggleRecording(
           model: selectedModel,
           mode: aiMode,
-          provider: aiProvider
+          provider: aiProvider,
+          voiceCommandsEnabled: voiceCommandsEnabled
         )
       }
     } label: {

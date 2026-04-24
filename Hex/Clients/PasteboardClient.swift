@@ -17,7 +17,16 @@ private let pasteboardLogger = HexLog.pasteboard
 
 @DependencyClient
 struct PasteboardClient {
-    var paste: @Sendable (String) async -> Void
+    /// Paste `text` into the user's target application.
+    ///
+    /// `sourceAppBundleID` is the bundle identifier of the app that was
+    /// frontmost when the user started recording — captured in
+    /// `TranscriptionFeature.startRecording`. If provided, the paste
+    /// flow re-activates that app and waits briefly for focus to
+    /// settle before inserting text, so pastes reliably land in the
+    /// user's intended app even when they've Cmd-Tabbed to a different
+    /// window while Whisper / AI post-processing was running.
+    var paste: @Sendable (String, String?) async -> Void
     var copy: @Sendable (String) async -> Void
     var sendKeyboardCommand: @Sendable (KeyboardCommand) async -> Void
 }
@@ -26,8 +35,8 @@ extension PasteboardClient: DependencyKey {
     static var liveValue: Self {
         let live = PasteboardClientLive()
         return .init(
-            paste: { text in
-                await live.paste(text: text)
+            paste: { text, sourceAppBundleID in
+                await live.paste(text: text, sourceAppBundleID: sourceAppBundleID)
             },
             copy: { text in
                 await live.copy(text: text)
@@ -81,12 +90,107 @@ struct PasteboardClientLive {
     }
 
     @MainActor
-    func paste(text: String) async {
+    func paste(text: String, sourceAppBundleID: String?) async {
+        // Before doing anything, bring the user's intended target app
+        // back to front. Without this, a paste that lands 1-3s after
+        // the hotkey release (Whisper + AI post-processing take time)
+        // goes to whichever app the user Cmd-Tabbed to during the
+        // wait — not the app they were dictating into. See the file's
+        // `reactivateSourceApp` for the full rationale.
+        await reactivateSourceApp(bundleID: sourceAppBundleID)
+
+        // Hard refuse to paste into Quill itself. If the user has our
+        // Settings / History / menu bar popover frontmost when the
+        // paste fires, we'd write the transcription into one of our
+        // own text fields instead of the intended app. Both the AX
+        // path and the Cmd+V path will happily do this if we don't
+        // guard against it — and the result is the transcription
+        // silently vanishing from the user's perspective.
+        let ourBundleID = Bundle.main.bundleIdentifier ?? ""
+        if let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           frontBundle == ourBundleID {
+            pasteboardLogger.warning(
+                "Frontmost app is Quill itself; refusing to paste into ourselves. Leaving transcription in the clipboard."
+            )
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            return
+        }
+
         if hexSettings.useClipboardPaste {
             await pasteWithClipboard(text)
         } else {
             simulateTypingWithAppleScript(text)
         }
+
+        // After either path, make sure the clipboard contains the
+        // transcription — not whatever the user had copied before.
+        // Rationale: if our AX insertion landed in the wrong element
+        // (or a silent failure we couldn't detect), the user will
+        // naturally try Cmd+V in the real target app. That manual
+        // paste must deliver the transcription, never a previously
+        // copied API key, password, or unrelated text. Also, if the
+        // user explicitly wants Quill to keep the transcription in
+        // their clipboard (the default since 0.8.5), this is exactly
+        // what they asked for.
+        //
+        // We only skip this if the user has explicitly opted to
+        // restore the previous clipboard (`copyToClipboard = false`)
+        // AND we went down the clipboard path — in that case the
+        // existing 3 s restore timer owns the clipboard lifecycle.
+        if hexSettings.copyToClipboard {
+            let pb = NSPasteboard.general
+            if pb.string(forType: .string) != text {
+                pb.clearContents()
+                pb.setString(text, forType: .string)
+                pasteboardLogger.debug("Synced clipboard to transcription (post-paste safety)")
+            }
+        }
+    }
+
+    /// Bring the user's recording-time target app back to front so
+    /// that both the Accessibility-focused-element query and the
+    /// injected Cmd+V land in the intended app, not whichever window
+    /// the user happened to have focused when the transcription
+    /// finished. Especially important on slow-to-finish paths
+    /// (long recordings + AI post-processing) where the user is very
+    /// likely to have switched contexts during the wait.
+    @MainActor
+    private func reactivateSourceApp(bundleID: String?) async {
+        guard let bundleID, !bundleID.isEmpty else {
+            pasteboardLogger.debug("No source app bundle ID; skipping reactivation")
+            return
+        }
+        // If we are the frontmost app (e.g. the user was recording
+        // *into* Quill, or Settings is open), don't reactivate — any
+        // paste should go to whatever is front. The Quill-refuse
+        // guard above handles the pathological case.
+        if bundleID == Bundle.main.bundleIdentifier { return }
+
+        let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleID
+        )
+        guard let app = running.first else {
+            pasteboardLogger.info("Source app \(bundleID) no longer running; pasting into whatever is front")
+            return
+        }
+
+        // Already frontmost? Still nudge focus + short wait — this
+        // covers the case where the user Cmd-Tabbed away and back
+        // rapidly, leaving the window layer technically right but the
+        // focused-element AX state stale.
+        let alreadyFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
+        if !alreadyFront {
+            app.activate(options: [.activateIgnoringOtherApps])
+            pasteboardLogger.debug("Reactivated source app \(bundleID)")
+        }
+
+        // Wait for focus to settle. 120ms is a lot longer than it
+        // looks — it's what reliably works for Arc, Chrome, VS Code,
+        // Slack, Notion, and native AppKit on an M-series Mac. Less
+        // than ~80ms and AX frequently reads the stale focused
+        // element.
+        try? await Task.sleep(for: .milliseconds(120))
     }
     
     @MainActor

@@ -518,7 +518,7 @@ private extension TranscriptionFeature {
        VoiceCommand.editorCommands.contains(command)
     {
       transcriptionFeatureLogger.info("Voice command detected: \(String(describing: command))")
-      return executeVoiceCommand(command, audioURL: audioURL)
+      return executeVoiceCommand(command, audioURL: audioURL, sourceAppBundleID: state.sourceAppBundleID)
     }
 
     // Inline substitution: turn "hello comma world period new paragraph
@@ -621,7 +621,15 @@ private extension TranscriptionFeature {
   }
 
   /// Executes a voice command via keyboard simulation instead of pasting text.
-  func executeVoiceCommand(_ command: VoiceCommand, audioURL: URL) -> Effect<Action> {
+  /// Punctuation cases (period, comma, etc.) are unreachable as of 0.8.x —
+  /// `VoiceCommandSubstituter` handles those inline now; only editor
+  /// commands (undo, redo, selectAll, newLine, newParagraph) reach this
+  /// path via `VoiceCommand.editorCommands` filtering. Kept for safety.
+  func executeVoiceCommand(
+    _ command: VoiceCommand,
+    audioURL: URL,
+    sourceAppBundleID: String?
+  ) -> Effect<Action> {
     .run { [pasteboard, soundEffect] _ in
       try? FileManager.default.removeItem(at: audioURL)
 
@@ -639,13 +647,13 @@ private extension TranscriptionFeature {
       case .redo:
         await pasteboard.sendKeyboardCommand(.init(key: .z, modifiers: [.command, .shift]))
       case .period:
-        await pasteboard.paste(".")
+        await pasteboard.paste(".", sourceAppBundleID)
       case .comma:
-        await pasteboard.paste(",")
+        await pasteboard.paste(",", sourceAppBundleID)
       case .questionMark:
-        await pasteboard.paste("?")
+        await pasteboard.paste("?", sourceAppBundleID)
       case .exclamationMark:
-        await pasteboard.paste("!")
+        await pasteboard.paste("!", sourceAppBundleID)
       }
 
       soundEffect.play(.pasteTranscript)
@@ -705,7 +713,7 @@ private extension TranscriptionFeature {
       try? FileManager.default.removeItem(at: audioURL)
     }
 
-    await pasteboard.paste(result)
+    await pasteboard.paste(result, sourceAppBundleID)
     soundEffect.play(.pasteTranscript)
   }
 }

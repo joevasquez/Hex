@@ -92,7 +92,10 @@ struct AppFeature {
           return .none
         }
         return .run { _ in
-          await pasteboard.paste(lastTranscript)
+          // No source app to reactivate — this action is triggered by
+          // a user hotkey / menu click; the frontmost app at that
+          // moment IS the target.
+          await pasteboard.paste(lastTranscript, nil)
         }
         
       case .transcription(.modelMissing):

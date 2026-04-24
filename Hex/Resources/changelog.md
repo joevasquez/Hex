@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.7
+
+### Fixes
+
+- **macOS: paste reliably lands in the right app, every time.** The remaining unreliability — "sometimes my transcription shows up, sometimes I paste my previous clipboard" — traced to three compounding bugs:
+  1. The paste targeted *whichever app was frontmost when transcription finished*, not the app the user was dictating into. If you Cmd-Tabbed away while Whisper or AI post-processing was running (1–3 seconds), the paste landed in the wrong window.
+  2. The Accessibility-insertion path bypasses the clipboard entirely, so if AX landed in the wrong element and you tried to `Cmd+V` manually in your actual target, you pasted whatever was in the clipboard *before* Quill ran (API keys, etc.).
+  3. Nothing stopped a paste from writing into Quill's own Settings / History window.
+- **Fix:** Quill now remembers which app you started recording in and reactivates it before pasting (with a short settle-time for focus to update), refuses to paste into itself, and after every successful paste syncs the transcription into the clipboard — so manual `Cmd+V` fallback always gives you the dictation, never stale content.
+
 ## 0.8.6
 
 ### Fixes

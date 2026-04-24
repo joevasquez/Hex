@@ -65,6 +65,17 @@ enum TextAIClient {
     print(
       "TextAIClient: response \(result.count) chars — first 400:\n\(String(result.prefix(400)))\n---"
     )
+
+    // Safety net: if the model ignored the system prompt and treated
+    // the transcript as a conversation (answering a question, refusing
+    // to transform, narrating its own role), fall back to the raw
+    // transcript so the user's dictation is never replaced by an
+    // assistant-style reply.
+    if TranscriptRefusalDetector.isRefusal(result) {
+      print("TextAIClient: response looks like a refusal; falling back to raw transcript")
+      return text
+    }
+
     return result
   }
 
@@ -83,10 +94,12 @@ enum TextAIClient {
     request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
     request.timeoutInterval = timeout
 
+    let userMessage = TranscriptWrapper.wrap(text)
+
     let body: [String: Any] = [
       "model": AIProvider.anthropic.defaultModel,
       "system": systemPrompt,
-      "messages": [["role": "user", "content": text]],
+      "messages": [["role": "user", "content": userMessage]],
       "max_tokens": 2048,
     ]
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -116,11 +129,13 @@ enum TextAIClient {
     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     request.timeoutInterval = timeout
 
+    let userMessage = TranscriptWrapper.wrap(text)
+
     let body: [String: Any] = [
       "model": AIProvider.openAI.defaultModel,
       "messages": [
         ["role": "system", "content": systemPrompt],
-        ["role": "user", "content": text],
+        ["role": "user", "content": userMessage],
       ],
       "temperature": 0.3,
       "max_tokens": 2048,

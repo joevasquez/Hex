@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3
+
+### Fixes
+
+- **AI no longer answers questions in your dictation.** If you dictated "Do you have an interest in joining for an introduction call?", some modes would respond as the AI ("I am a text post-processor, I cannot join calls…") instead of just punctuating the question. The user message is now wrapped in `<transcript>` tags that the system prompt treats as data, with a concrete example showing that questions inside should be punctuated, not answered. As a safety net, obvious refusal responses ("I am a…", "I cannot…", "As an AI…") are detected and the raw transcript is used instead so no dictation is ever lost.
+- **Email mode no longer emits `<Your name>`.** The closing used to include a literal placeholder; it now ends at `Best,` and lets you type your own signature. Also stops emitting other angle-bracketed placeholders like `<recipient-name>` / `<subject>`.
+
 ## 0.8.2
 
 ### New

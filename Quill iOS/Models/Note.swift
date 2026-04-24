@@ -20,6 +20,13 @@ struct Note: Codable, Identifiable, Equatable, Hashable {
   /// permission is granted; never updated on subsequent appends so the
   /// value reflects "where this thought began."
   var location: NoteLocation?
+  /// When true, the title is eligible for automatic generation
+  /// (either from `Note.derivedTitle` as a display fallback, or via
+  /// `TextAIClient.generateTitle` after the first append). Set to
+  /// `false` the moment the user renames manually OR the AI writes
+  /// a real title, so subsequent appends don't keep re-titling the
+  /// note out from under the user.
+  var isAutoTitle: Bool
 
   init(
     id: UUID = UUID(),
@@ -27,7 +34,8 @@ struct Note: Codable, Identifiable, Equatable, Hashable {
     body: String = "",
     createdAt: Date = Date(),
     updatedAt: Date? = nil,
-    location: NoteLocation? = nil
+    location: NoteLocation? = nil,
+    isAutoTitle: Bool = true
   ) {
     self.id = id
     self.title = title
@@ -35,6 +43,23 @@ struct Note: Codable, Identifiable, Equatable, Hashable {
     self.createdAt = createdAt
     self.updatedAt = updatedAt ?? createdAt
     self.location = location
+    self.isAutoTitle = isAutoTitle
+  }
+
+  /// Custom Codable init so notes persisted before the
+  /// `isAutoTitle` field existed decode cleanly. Legacy notes
+  /// default to `false` — they already have a title the user has
+  /// been living with, so we don't want the AI-title feature to
+  /// retroactively overwrite it.
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    id = try c.decode(UUID.self, forKey: .id)
+    title = try c.decode(String.self, forKey: .title)
+    body = try c.decode(String.self, forKey: .body)
+    createdAt = try c.decode(Date.self, forKey: .createdAt)
+    updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+    location = try c.decodeIfPresent(NoteLocation.self, forKey: .location)
+    isAutoTitle = try c.decodeIfPresent(Bool.self, forKey: .isAutoTitle) ?? false
   }
 
   /// Derive a title from the first meaningful line of body text.

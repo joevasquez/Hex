@@ -75,6 +75,21 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 
 6. **Logging**: All diagnostics should use the unified logging helper `HexLog` (`HexCore/Sources/HexCore/Logging.swift`). Pick an existing category (e.g., `.transcription`, `.recording`, `.settings`) or add a new case so Console predicates stay consistent. Avoid `print` and prefer privacy annotations (`, privacy: .private`) for anything potentially sensitive like transcript text or file paths.
 
+7. **Paste reliability (macOS)**: `PasteboardClient.paste(text:sourceAppBundleID:)` takes the bundle ID captured at record-start so we can reactivate the user's original target app before pasting (AppKit's front-app state has usually drifted 1–3 s later after Whisper + AI finish). Order of attempts: (a) reactivate source app, wait 120 ms for focus to settle; (b) refuse to paste if we're still frontmost (don't write into Quill's own Settings); (c) Accessibility `AXUIElementSetAttributeValue(kAXSelectedTextAttribute)` with before/after value verification — silent "success" from apps that accept but drop the write is caught and falls through; (d) clipboard + `Cmd+V` via CGEvent; (e) always sync the transcription into the clipboard post-paste so any user-initiated `Cmd+V` recovery still delivers the dictation. Both AX insertion and CGEvent injection require `AXIsProcessTrusted()` — we check once upfront and skip paths that would silently fail when permission is missing.
+
+8. **Cross-platform AI modes architecture**:
+   - `HexCore/Models/AIProcessingMode.swift` holds the built-in modes (off / clean / email / notes / message / code) plus the safety preamble (public) used by inline edit + custom modes.
+   - `HexCore/Models/CustomAIMode.swift` defines user-authored modes (`name`, `systemPrompt`, `icon`) and `AIModeSelection` — a wrapper supporting both built-ins and `custom:<uuid>`. `CustomAIMode.fullSystemPrompt` wraps the user prompt in the shared preamble.
+   - macOS persists custom modes in `HexSettings.customAIModes`; iOS via `@AppStorage(CustomAIModesStorage.userDefaultsKey)` (JSON-encoded `[CustomAIMode]`).
+   - Both AI clients (`AIProcessingClient` on macOS, `TextAIClient` on iOS) accept an optional `customSystemPrompt` override — call sites resolve the prompt from the current selection and pass it through.
+   - User messages are wrapped in `<transcript>…</transcript>` tags by `TranscriptWrapper`; `TranscriptRefusalDetector` catches "I am a post-processor"-style refusals and falls back to the raw transcript so the user's dictation is never replaced by an assistant-style reply.
+
+9. **Inline Edit (macOS)**: opt-in via `hexSettings.inlineEditEnabled`. When on and the focused app has a selection at recording-start, `TranscriptionFeature` captures it into `state.inlineEditSelection` (via `InlineEditClient.captureSelection`), treats the dictation as an *instruction*, and at finalize routes through the AI with `InlineEditPrompt.systemPrompt` + user message `"Instruction: <dictated> \n<selection>…</selection>"`. `InlineEditClient.replaceSelection` writes the edited text back via AX; falls back to normal paste if AX replacement fails.
+
+10. **Integrations surface (frontend-only)**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections. Settings UIs (`IntegrationsSectionView` on macOS, `IntegrationsView` on iOS) show "Coming Soon" on Connect — send adapters per integration land in a follow-up.
+
+11. **Auto-titles (iOS)**: New notes are created with empty `title` + `isAutoTitle = true`. `displayTitle` falls back to `Note.derivedTitle` until `NotesStore.generateTitleIfNeeded(noteID:provider:)` swaps in an LLM-generated 3–6 word title via `TextAIClient.generateTitle(for:provider:)`. Flipping `isAutoTitle = false` (either by the AI landing OR the user calling `renameNote`) locks the title so subsequent appends don't re-title. Legacy notes persisted before this field decode as `isAutoTitle = false` so their derived titles are preserved.
+
 ## Models (2025‑11)
 
 - Default: Parakeet TDT v3 (multilingual) via FluidAudio
@@ -161,6 +176,20 @@ The iOS app lives in the `Quill iOS/` folder (note: folder name has a space — 
 - `Clients/TextAIClient.swift` — iOS-specific text post-processor. Mirrors the shared macOS `AIProcessingClient` but reads the API key via `KeychainStore` and logs per-call so "AI didn't run" failures are visible.
 - `Clients/KeychainStore.swift` — direct Security-framework helpers (`SecItemAdd` / `SecItemCopyMatching`). See the keychain note below for why this exists.
 - `Clients/LocationClient.swift` — one-shot best-effort reverse geocode used when a note is created.
+- `CustomModesView.swift` — Settings sub-screen for managing user-authored AI modes. Persists via `@AppStorage` under `CustomAIModesStorage.userDefaultsKey`. Modes surface as chips in the main screen's mode row (see `CustomModeChip` in ContentView).
+- `IntegrationsView.swift` — Settings sub-screen listing the integrations catalog (`HexCore/Models/Integration.swift`). Frontend-only; connection state persisted via `IntegrationConnectionStore` in UserDefaults. Free tier capped at `IntegrationLimits.freeTierMaxConnections = 2`.
+- `QuillDeepLinkRouter.swift` — `@MainActor ObservableObject` that parses incoming `quill://` URLs (from the widget) into a `QuillDeepLink` enum. `ContentView` observes `pendingLink` and routes: `.record` starts a new note + recording, `.notes` shows the notes list.
+
+### Widget (iOS home-screen)
+
+The widget extension lives in `QuillWidget/` as a separate target (`QuillWidgetExtension`), **NOT** in `Quill iOS/`. Created through Xcode's `File → New → Target → Widget Extension` flow; the resulting `PBXNativeTarget` / sync group / exception set / embed build phase are all in `project.pbxproj`.
+
+- `QuillWidget/QuillWidgetBundle.swift` — `@main WidgetBundle` entry.
+- `QuillWidget/QuillWidget.swift` — small + medium widget families. Small = feather + "Quill" + "Dictate" CTA. Medium = same on the left, latest-note card on the right. Both use a purple gradient `containerBackground`. The feather is drawn as a SwiftUI `FeatherShape: Shape` (filled vector path), not the PNG asset — the PNG is a thin outline that collapses to an illegible stroke at widget icon sizes.
+- `QuillWidget/Assets.xcassets/` — standard widget assets. The sync group includes a `PBXFileSystemSynchronizedBuildFileExceptionSet` excluding `Info.plist` from the target's Copy Bundle Resources phase (otherwise it collides with `INFOPLIST_FILE` → `QuillWidget/Info.plist`).
+- `HexCore/Models/QuillWidgetSnapshot.swift` — tiny Codable blob (title + preview + updatedAt) written by the main app into App Group `group.com.joevasquez.Quill` UserDefaults. Both targets need the **App Groups** capability with this group in their `*.entitlements`.
+- Deep links: tapping the small family or the left half of the medium family opens `quill://record` → `ContentView` starts a **new** note + begins recording. Tapping the right half of the medium family opens `quill://notes` → presents the notes list.
+- `NotesStore.updateWidgetSnapshot()` fires on every `save()` and calls `WidgetCenter.shared.reloadAllTimelines()`.
 
 ### Keychain (iOS)
 

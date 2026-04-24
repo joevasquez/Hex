@@ -38,6 +38,8 @@ struct SettingsView: View {
 			SoundSectionView(store: store)
 			GeneralSectionView(store: store)
 			AIProcessingSectionView(store: store)
+			CustomModesSectionView(store: store)
+			IntegrationsSectionView(store: store)
 			HistorySectionView(store: store)
 		}
 		.formStyle(.grouped)

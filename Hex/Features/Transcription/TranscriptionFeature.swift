@@ -30,6 +30,12 @@ struct TranscriptionFeature {
     var sourceAppName: String?
     var capturedContext: AppContext?
     var partialTranscript: String = ""
+    /// Set at recording-start when `inlineEditEnabled` is on AND the
+    /// focused app had a non-empty selection. When this is non-nil,
+    /// the dictation is interpreted as an *instruction* for editing
+    /// this text rather than as new content to paste. The transcript
+    /// pipeline branches on this at finalize time.
+    var inlineEditSelection: String?
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -58,6 +64,11 @@ struct TranscriptionFeature {
     case aiProcessingFinished
     case contextCaptured(AppContext)
     case partialTranscriptUpdated(String)
+    /// Fired after AX finishes reading the selection at recording-
+    /// start (see `inlineEdit.captureSelection`). Non-nil value
+    /// tells the finalize path to treat the dictation as an edit
+    /// instruction and replace this selection rather than paste.
+    case inlineEditSelectionCaptured(String)
 
     // Model availability
     case modelMissing
@@ -80,6 +91,7 @@ struct TranscriptionFeature {
   @Dependency(\.transcriptPersistence) var transcriptPersistence
   @Dependency(\.aiProcessing) var aiProcessing
   @Dependency(\.contextClient) var contextClient
+  @Dependency(\.inlineEdit) var inlineEdit
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -141,6 +153,11 @@ struct TranscriptionFeature {
 
       case let .partialTranscriptUpdated(text):
         state.partialTranscript = text
+        return .none
+
+      case let .inlineEditSelectionCaptured(selection):
+        state.inlineEditSelection = selection
+        transcriptionFeatureLogger.info("Inline edit: captured selection (\(selection.count) chars)")
         return .none
 
       case .modelMissing:
@@ -352,6 +369,7 @@ private extension TranscriptionFeature {
     }
     state.capturedContext = nil
     state.partialTranscript = ""
+    state.inlineEditSelection = nil
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
 
     let contextEnrichmentEnabled = state.hexSettings.contextEnrichmentEnabled && state.hexSettings.aiProcessingEnabled
@@ -359,11 +377,12 @@ private extension TranscriptionFeature {
     // here — the live transcription effect is disabled (see note below). Re-introduce
     // them when the streaming path returns.
 
+    let inlineEditEnabled = state.hexSettings.inlineEditEnabled
     // Prevent system sleep during recording
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
       .cancel(id: CancelID.liveTranscription),
-      .run { [sleepManagement, contextClient, preventSleep = state.hexSettings.preventSystemSleep] send in
+      .run { [sleepManagement, contextClient, inlineEdit, preventSleep = state.hexSettings.preventSystemSleep] send in
         // Play sound immediately for instant feedback
         soundEffect.play(.startRecording)
 
@@ -375,6 +394,14 @@ private extension TranscriptionFeature {
         if contextEnrichmentEnabled {
           let context = await contextClient.captureContext()
           await send(.contextCaptured(context))
+        }
+
+        // Inline-edit: if the user has a selection in the focused
+        // app AND they've opted into inline-edit, capture it now
+        // (before focus potentially shifts) so we can route the
+        // dictation as an edit instruction at finalize time.
+        if inlineEditEnabled, let selection = await inlineEdit.captureSelection() {
+          await send(.inlineEditSelectionCaptured(selection))
         }
 
         await recording.startRecording()
@@ -577,6 +604,50 @@ private extension TranscriptionFeature {
     let sourceAppName = state.sourceAppName
     let capturedContext = state.capturedContext
     let transcriptionHistory = state.$transcriptionHistory
+    let inlineEditSelection = state.inlineEditSelection
+
+    // Inline-edit branch: user had text selected when they started
+    // dictating AND inlineEditEnabled is on. Skip the normal AI mode
+    // + paste flow entirely and instead ask the LLM to transform the
+    // selection according to the dictated instruction, then replace
+    // the selection via AX.
+    if let selection = inlineEditSelection, !modifiedResult.isEmpty {
+      state.isAIProcessing = true
+      return .run { [aiProcessing, inlineEdit, pasteboard] send in
+        let userMessage = InlineEditPrompt.userMessage(
+          instruction: modifiedResult,
+          selection: selection
+        )
+        do {
+          let edited = try await aiProcessing.process(
+            userMessage,
+            .clean,               // placeholder mode; overridden by customSystemPrompt below
+            aiProvider,
+            nil,                  // no context enrichment for inline edit
+            InlineEditPrompt.systemPrompt
+          )
+          await send(.aiProcessingFinished)
+
+          // Replace the selection directly via AX. If that fails
+          // (target element lost focus, app doesn't expose AX, etc.)
+          // fall back to pasting the edited text so the user isn't
+          // left with nothing.
+          let replaced = await inlineEdit.replaceSelection(edited)
+          if !replaced {
+            transcriptionFeatureLogger.warning("Inline edit: AX replace failed; falling back to paste")
+            await pasteboard.paste(edited, sourceAppBundleID)
+          }
+          soundEffect.play(.pasteTranscript)
+          try? FileManager.default.removeItem(at: audioURL)
+        } catch {
+          transcriptionFeatureLogger.error("Inline edit AI failed: \(error.localizedDescription); pasting instruction as raw text")
+          await send(.aiProcessingFinished)
+          await pasteboard.paste(modifiedResult, sourceAppBundleID)
+          try? FileManager.default.removeItem(at: audioURL)
+        }
+      }
+      .cancellable(id: CancelID.transcription)
+    }
 
     return .run { [aiProcessing] send in
       do {
@@ -584,7 +655,7 @@ private extension TranscriptionFeature {
         var finalResult = modifiedResult
         if aiEnabled {
           do {
-            finalResult = try await aiProcessing.process(modifiedResult, resolvedMode, aiProvider, capturedContext)
+            finalResult = try await aiProcessing.process(modifiedResult, resolvedMode, aiProvider, capturedContext, nil)
             transcriptionFeatureLogger.info("AI processing produced \(finalResult.count) chars from \(modifiedResult.count) chars")
           } catch {
             transcriptionFeatureLogger.error("AI processing failed, using unprocessed text: \(error.localizedDescription)")

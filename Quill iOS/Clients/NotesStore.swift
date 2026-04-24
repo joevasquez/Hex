@@ -17,6 +17,9 @@ import Foundation
 import HexCore
 import SwiftUI
 import UIKit
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 
 @MainActor
 final class NotesStore: ObservableObject {
@@ -24,6 +27,10 @@ final class NotesStore: ObservableObject {
 
   @Published private(set) var notes: [Note] = []
   @Published private(set) var activeNoteID: UUID?
+  /// Note IDs with a title-generation request currently in flight.
+  /// Prevents double-dispatch when multiple appends land before the
+  /// first AI title request returns.
+  @Published private(set) var generatingTitleIDs: Set<UUID> = []
   /// Cached AI analyses keyed by photo UUID. Populated from disk on
   /// launch and updated in-place when a new analysis lands; views bind
   /// to this so they auto-refresh when an async vision call completes.
@@ -84,9 +91,14 @@ final class NotesStore: ObservableObject {
       save()
       return note
     } else {
-      // No active note — create one seeded with this text.
+      // No active note — create one seeded with this text. Leave
+      // `title` empty so `displayTitle` falls back to the derived
+      // title until `generateTitleIfNeeded` replaces it with an
+      // AI-generated one. `isAutoTitle` defaults to true, which
+      // unlocks both the derived-fallback display and the async
+      // AI-title path.
       var note = Note(
-        title: Note.derivedTitle(from: trimmed),
+        title: "",
         body: trimmed,
         createdAt: now,
         updatedAt: now,
@@ -130,6 +142,9 @@ final class NotesStore: ObservableObject {
   func renameNote(id: UUID, to title: String) {
     guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
     notes[idx].title = title
+    // User is intentionally setting the name — lock it in so future
+    // AI title generation doesn't stomp it.
+    notes[idx].isAutoTitle = false
     notes[idx].updatedAt = Date()
     save()
   }
@@ -185,6 +200,55 @@ final class NotesStore: ObservableObject {
     } catch {
       print("NotesStore: failed to save photo: \(error)")
       return nil
+    }
+  }
+
+  // MARK: - Auto titles
+
+  /// If `noteID` still has `isAutoTitle == true` (either a brand-new
+  /// note that just got its first append, or one that's never been
+  /// renamed/AI-titled), fire an async LLM call to generate a
+  /// short, specific title for it. No-op when:
+  ///   - the note has already been user-renamed or AI-titled,
+  ///   - its body is empty,
+  ///   - another title request for the same note is already in flight,
+  ///   - the provider has no API key configured (title gen is a
+  ///     nice-to-have; we don't surface an error for this).
+  func generateTitleIfNeeded(noteID: UUID, provider: AIProvider) {
+    guard let note = notes.first(where: { $0.id == noteID }) else { return }
+    guard note.isAutoTitle else { return }
+    let body = NoteContent.stripPhotos(from: note.body)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !body.isEmpty else { return }
+    guard !generatingTitleIDs.contains(noteID) else { return }
+    generatingTitleIDs.insert(noteID)
+
+    // Cap the input at 800 chars — titles only need the gist, and
+    // long inputs slow the LLM down + cost more tokens than this
+    // feature warrants.
+    let input = body.count > 800 ? String(body.prefix(800)) : body
+
+    Task { @MainActor in
+      defer { generatingTitleIDs.remove(noteID) }
+
+      do {
+        let title = try await TextAIClient.generateTitle(for: input, provider: provider)
+        guard !title.isEmpty else { return }
+        guard let idx = notes.firstIndex(where: { $0.id == noteID }) else { return }
+        // Re-check: the user may have renamed manually between the
+        // request firing and the reply landing. Don't stomp their
+        // choice.
+        guard notes[idx].isAutoTitle else { return }
+        notes[idx].title = title
+        notes[idx].isAutoTitle = false
+        notes[idx].updatedAt = Date()
+        save()
+      } catch {
+        // Best-effort: log and leave the title as the derived
+        // fallback. Don't surface to the user — a missing API key
+        // shouldn't feel like a failure here.
+        print("NotesStore: title generation failed: \(error.localizedDescription)")
+      }
     }
   }
 
@@ -260,6 +324,44 @@ final class NotesStore: ObservableObject {
     } catch {
       print("NotesStore: failed to persist notes.json: \(error)")
     }
+    // Update the home-screen widget's snapshot every time notes
+    // change. The widget reads this blob from the App Group shared
+    // UserDefaults; `WidgetCenter.reloadAllTimelines` tells
+    // WidgetKit to re-render the visible widget. Both calls are
+    // cheap and safe to fire from every mutation.
+    updateWidgetSnapshot()
+  }
+
+  /// Pick the most-recently-updated note and publish a compact
+  /// snapshot for the widget extension.
+  private func updateWidgetSnapshot() {
+    guard let latest = sortedNotes.first else {
+      QuillWidgetSnapshot.clear()
+      #if canImport(WidgetKit)
+      WidgetCenter.shared.reloadAllTimelines()
+      #endif
+      return
+    }
+
+    let cleanedBody = NoteContent.stripPhotos(from: latest.body)
+    let previewChars = 120
+    let preview: String
+    if cleanedBody.count <= previewChars {
+      preview = cleanedBody
+    } else {
+      preview = String(cleanedBody.prefix(previewChars)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+    }
+
+    let snapshot = QuillWidgetSnapshot(
+      title: latest.displayTitle,
+      preview: preview,
+      updatedAt: latest.updatedAt
+    )
+    snapshot.save()
+
+    #if canImport(WidgetKit)
+    WidgetCenter.shared.reloadAllTimelines()
+    #endif
   }
 
   private func restoreActiveNoteID() {

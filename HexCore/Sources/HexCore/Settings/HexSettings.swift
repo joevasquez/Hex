@@ -58,6 +58,17 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var voiceCommandsEnabled: Bool
 	public var contextEnrichmentEnabled: Bool
 	public var liveTranscriptEnabled: Bool
+	/// User-defined AI post-processing modes. Complement the built-in
+	/// `AIProcessingMode` cases — e.g. "Clinical note", "VC update",
+	/// "Code review email". See `CustomAIMode` for the data shape.
+	public var customAIModes: [CustomAIMode]
+	/// When on, if text is already selected in the focused app when
+	/// the user starts dictating, the dictation is treated as an
+	/// *instruction* ("tighten 20%", "translate to Spanish") and the
+	/// selected text is edited in-place via the LLM instead of being
+	/// appended. Off by default — changes the dictation behavior
+	/// enough that users should opt in.
+	public var inlineEditEnabled: Bool
 
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
@@ -102,7 +113,9 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		appModeRules: [AppModeRule] = [],
 		voiceCommandsEnabled: Bool = false,
 		contextEnrichmentEnabled: Bool = false,
-		liveTranscriptEnabled: Bool = false
+		liveTranscriptEnabled: Bool = false,
+		customAIModes: [CustomAIMode] = [],
+		inlineEditEnabled: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -136,6 +149,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.voiceCommandsEnabled = voiceCommandsEnabled
 		self.contextEnrichmentEnabled = contextEnrichmentEnabled
 		self.liveTranscriptEnabled = liveTranscriptEnabled
+		self.customAIModes = customAIModes
+		self.inlineEditEnabled = inlineEditEnabled
 		normalizeDoubleTapSettings()
 	}
 
@@ -192,6 +207,8 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case voiceCommandsEnabled
 	case contextEnrichmentEnabled
 	case liveTranscriptEnabled
+	case customAIModes
+	case inlineEditEnabled
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -333,6 +350,8 @@ private enum HexSettingsSchema {
 		SettingsField(.voiceCommandsEnabled, keyPath: \.voiceCommandsEnabled, default: defaults.voiceCommandsEnabled).eraseToAny(),
 		SettingsField(.contextEnrichmentEnabled, keyPath: \.contextEnrichmentEnabled, default: defaults.contextEnrichmentEnabled).eraseToAny(),
 		SettingsField(.liveTranscriptEnabled, keyPath: \.liveTranscriptEnabled, default: defaults.liveTranscriptEnabled).eraseToAny(),
+		SettingsField(.customAIModes, keyPath: \.customAIModes, default: defaults.customAIModes).eraseToAny(),
+		SettingsField(.inlineEditEnabled, keyPath: \.inlineEditEnabled, default: defaults.inlineEditEnabled).eraseToAny(),
 	]
 }
 

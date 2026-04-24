@@ -33,12 +33,42 @@ final class RecordingViewModel: ObservableObject {
   /// Set when an AI post-processing call failed and we fell back to
   /// the raw transcript. Cleared on the next successful run.
   @Published var aiErrorMessage: String?
+  /// True while the WhisperKit model is loading (first launch, or
+  /// after the user changes models in Settings). Surfaced in the
+  /// status area so the user knows why the first transcription is
+  /// slower than subsequent ones — otherwise it looks like AI
+  /// processing is hanging.
+  @Published var isPreparingModel: Bool = false
 
   private var recorder = IOSRecordingClient.shared
   private var whisperKit: WhisperKit?
   private var timerTask: Task<Void, Never>?
   private var recordingStartedAt: Date?
   private var cancellables: Set<AnyCancellable> = []
+
+  /// Prepare (download if needed + load) the Whisper model for
+  /// `modelName` ahead of any recording. Doing this on app launch
+  /// means the first real transcription doesn't block on a 1–2
+  /// minute WhisperKit init. Safe to call multiple times — it's a
+  /// no-op when the requested model is already loaded.
+  func prewarmModel(_ modelName: String) async {
+    // Already loaded and matching? Nothing to do.
+    if whisperKit != nil, whisperKit?.modelFolder?.lastPathComponent == modelName {
+      return
+    }
+    isPreparingModel = true
+    defer { isPreparingModel = false }
+    do {
+      whisperKit = try await WhisperKit(
+        WhisperKitConfig(model: modelName, download: true)
+      )
+      print("RecordingViewModel: prewarmed Whisper model \(modelName)")
+    } catch {
+      // Non-fatal: if pre-warm fails (offline, corrupt cache, etc.)
+      // the normal transcription path will retry on first record.
+      print("RecordingViewModel: prewarm failed for \(modelName): \(error.localizedDescription)")
+    }
+  }
 
   init() {
     // Mirror the recorder's published live partial onto our own @Published so
@@ -63,7 +93,8 @@ final class RecordingViewModel: ObservableObject {
     model: String,
     mode: AIProcessingMode,
     provider: AIProvider,
-    voiceCommandsEnabled: Bool
+    voiceCommandsEnabled: Bool,
+    customSystemPrompt: String? = nil
   ) async {
     switch phase {
     case .idle, .done, .error:
@@ -73,7 +104,8 @@ final class RecordingViewModel: ObservableObject {
         model: model,
         mode: mode,
         provider: provider,
-        voiceCommandsEnabled: voiceCommandsEnabled
+        voiceCommandsEnabled: voiceCommandsEnabled,
+        customSystemPrompt: customSystemPrompt
       )
     default:
       break
@@ -128,7 +160,8 @@ final class RecordingViewModel: ObservableObject {
     model: String,
     mode: AIProcessingMode,
     provider: AIProvider,
-    voiceCommandsEnabled: Bool
+    voiceCommandsEnabled: Bool,
+    customSystemPrompt: String? = nil
   ) async {
     timerTask?.cancel()
     let url = recorder.stopRecording()
@@ -169,10 +202,16 @@ final class RecordingViewModel: ObservableObject {
         return
       }
 
-      if mode != .off {
+      let shouldRunAI = mode != .off || customSystemPrompt != nil
+      if shouldRunAI {
         phase = .aiProcessing
         do {
-          processedTranscript = try await TextAIClient.process(text: text, mode: mode, provider: provider)
+          processedTranscript = try await TextAIClient.process(
+            text: text,
+            mode: mode,
+            provider: provider,
+            customSystemPrompt: customSystemPrompt
+          )
         } catch {
           // Fall through with the raw transcript so recording isn't
           // lost. The console log tells us why (usually: missing key).
@@ -197,9 +236,11 @@ struct ContentView: View {
   @AppStorage(QuillIOSSettingsKey.aiProcessingMode) private var aiModeRaw: String = QuillIOSSettingsKey.defaultMode
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
   @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
+  @AppStorage(CustomAIModesStorage.userDefaultsKey) private var customModesData: Data = Data()
 
   @StateObject private var vm = RecordingViewModel()
   @StateObject private var notes = NotesStore.shared
+  @EnvironmentObject private var deepLinks: QuillDeepLinkRouter
   @State private var showingSettings = false
   @State private var showingNotesList = false
   @State private var idlePulse = false
@@ -215,12 +256,32 @@ struct ContentView: View {
   @State private var isBuildingPDF = false
   @State private var pendingDeleteNoteID: UUID?
 
+  /// The currently-selected mode, which may be either a built-in
+  /// `AIProcessingMode` or a user-created custom mode. Stored as
+  /// string in `aiModeRaw` using `AIModeSelection.rawValue`
+  /// (e.g. `"clean"`, `"notes"`, or `"custom:<uuid>"`).
+  private var currentSelection: AIModeSelection {
+    AIModeSelection(rawValue: aiModeRaw) ?? .builtIn(.off)
+  }
+
+  /// Back-compat helper — treated as `.off` whenever the current
+  /// selection is a custom mode. Code paths that need to know
+  /// "is AI processing on at all" should use
+  /// `currentSelection.resolveSystemPrompt(...) != nil` instead.
   private var aiMode: AIProcessingMode {
-    AIProcessingMode(rawValue: aiModeRaw) ?? .clean
+    if case .builtIn(let mode) = currentSelection { return mode }
+    // Custom mode selected — behaves like a non-off mode for UI
+    // colouring. `.clean` is a reasonable placeholder because it's
+    // purple-tinted and indicates "AI is on".
+    return .clean
   }
 
   private var aiProvider: AIProvider {
     AIProvider(rawValue: aiProviderRaw) ?? .anthropic
+  }
+
+  private var customModes: [CustomAIMode] {
+    CustomAIModesStorage.decode(customModesData)
   }
 
   var body: some View {
@@ -311,7 +372,45 @@ struct ContentView: View {
       .sheet(item: $shareRequest) { req in
         ShareSheet(items: req.items)
       }
-      .onAppear { idlePulse = true }
+      .onAppear {
+        idlePulse = true
+        // Pre-warm the Whisper model immediately on first appear so
+        // the initial transcription doesn't block on a long
+        // download + load. Happens in the background — user can
+        // still interact with everything else.
+        Task { await vm.prewarmModel(selectedModel) }
+      }
+      .onChange(of: selectedModel) { _, newModel in
+        Task { await vm.prewarmModel(newModel) }
+      }
+      .onChange(of: deepLinks.pendingLink) { _, link in
+        guard let link else { return }
+        switch link.link {
+        case .record:
+          // Widget tap: always start a FRESH note, then begin
+          // recording. Appending to an existing active note would
+          // feel surprising to a user who just tapped a home-screen
+          // widget — they expect a dedicated new capture.
+          Task {
+            let loc = await LocationClient.shared.currentPlace()
+            _ = notes.startNewNote(location: loc)
+            // Delay briefly to let the app finish becoming active so
+            // the mic permission prompt (if any) and recording
+            // startup don't race UIKit window transitions.
+            try? await Task.sleep(for: .milliseconds(300))
+            await vm.toggleRecording(
+              model: selectedModel,
+              mode: aiMode,
+              provider: aiProvider,
+              voiceCommandsEnabled: voiceCommandsEnabled
+            )
+            deepLinks.consume()
+          }
+        case .notes:
+          showingNotesList = true
+          deepLinks.consume()
+        }
+      }
       .onChange(of: vm.phase) { _, newPhase in
         if case .done = newPhase {
           appendTranscriptToActiveNote()
@@ -333,7 +432,15 @@ struct ContentView: View {
           model: selectedModel,
           mode: aiMode,
           provider: aiProvider,
-          voiceCommandsEnabled: voiceCommandsEnabled
+          voiceCommandsEnabled: voiceCommandsEnabled,
+          customSystemPrompt: currentSelection.resolveSystemPrompt(customModes: customModes).flatMap { _ in
+            // Only pass a custom prompt when the selection IS a custom mode;
+            // built-in selections use their own `mode.systemPrompt` via `aiMode`.
+            if case .custom = currentSelection {
+              return currentSelection.resolveSystemPrompt(customModes: customModes)
+            }
+            return nil
+          }
         )
         showingPhotoSourceDialog = true
       }
@@ -565,10 +672,15 @@ struct ContentView: View {
     if notes.activeNote == nil {
       Task {
         let loc = await LocationClient.shared.currentPlace()
-        notes.appendToActiveNote(text, locationIfCreating: loc)
+        let note = notes.appendToActiveNote(text, locationIfCreating: loc)
+        // Kick off AI title generation on the background. No-op if
+        // the note already has a locked-in title (user-renamed or
+        // previously AI-titled) — see `generateTitleIfNeeded`.
+        notes.generateTitleIfNeeded(noteID: note.id, provider: aiProvider)
       }
     } else {
-      notes.appendToActiveNote(text, locationIfCreating: nil)
+      let note = notes.appendToActiveNote(text, locationIfCreating: nil)
+      notes.generateTitleIfNeeded(noteID: note.id, provider: aiProvider)
     }
   }
 
@@ -592,13 +704,30 @@ struct ContentView: View {
   private var modeChipRow: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
+        // Built-in modes first — stable ordering, always present.
         ForEach(AIProcessingMode.allCases, id: \.rawValue) { mode in
+          let selected = currentSelection == .builtIn(mode)
           ModeChip(
             mode: mode,
-            isSelected: mode == aiMode,
+            isSelected: selected,
             action: {
               UISelectionFeedbackGenerator().selectionChanged()
-              aiModeRaw = mode.rawValue
+              aiModeRaw = AIModeSelection.builtIn(mode).rawValue
+            }
+          )
+        }
+
+        // User-authored custom modes after the built-ins. The chip
+        // style mirrors `ModeChip` so the row reads as one cohesive
+        // picker rather than two sections.
+        ForEach(customModes) { mode in
+          let selected = currentSelection == .custom(mode.id)
+          CustomModeChip(
+            mode: mode,
+            isSelected: selected,
+            action: {
+              UISelectionFeedbackGenerator().selectionChanged()
+              aiModeRaw = AIModeSelection.custom(mode.id).rawValue
             }
           )
         }
@@ -627,6 +756,13 @@ struct ContentView: View {
   private var statusCard: some View {
     if let aiError = vm.aiErrorMessage, vm.phase == .done {
       statusPill(aiError, icon: "exclamationmark.triangle", tint: .orange)
+    }
+    // Whisper model load runs on first launch (and when the user
+    // switches models). The first transcription blocks on this if
+    // it hasn't finished — surface it so users see "Loading model"
+    // rather than a 60-120 s hang during "Transcribing…".
+    if vm.isPreparingModel, vm.phase != .recording {
+      statusPill("Loading Whisper model…", icon: "arrow.down.circle", tint: .blue)
     }
     switch vm.phase {
     case .recording:
@@ -726,7 +862,15 @@ struct ContentView: View {
           model: selectedModel,
           mode: aiMode,
           provider: aiProvider,
-          voiceCommandsEnabled: voiceCommandsEnabled
+          voiceCommandsEnabled: voiceCommandsEnabled,
+          customSystemPrompt: currentSelection.resolveSystemPrompt(customModes: customModes).flatMap { _ in
+            // Only pass a custom prompt when the selection IS a custom mode;
+            // built-in selections use their own `mode.systemPrompt` via `aiMode`.
+            if case .custom = currentSelection {
+              return currentSelection.resolveSystemPrompt(customModes: customModes)
+            }
+            return nil
+          }
         )
       }
     } label: {
@@ -1158,6 +1302,38 @@ private struct ModeChip: View {
     case .off: .blue
     default: .purple
     }
+  }
+}
+
+/// Mode chip for user-authored custom modes. Visually matches
+/// `ModeChip` (same capsule / tint / padding) so the two types read
+/// as one unified picker row.
+private struct CustomModeChip: View {
+  let mode: CustomAIMode
+  let isSelected: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 6) {
+        Image(systemName: mode.icon)
+          .font(.caption.weight(.semibold))
+        Text(mode.displayName)
+          .font(.subheadline.weight(.medium))
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 8)
+      .background(
+        Capsule()
+          .fill(isSelected ? Color.purple : Color.secondary.opacity(0.12))
+      )
+      .foregroundStyle(isSelected ? Color.white : Color.primary)
+      .overlay(
+        Capsule()
+          .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.2), lineWidth: 1)
+      )
+    }
+    .buttonStyle(.plain)
   }
 }
 

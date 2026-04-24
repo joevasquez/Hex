@@ -32,6 +32,19 @@
 	<string>Quill lets you attach photos from your library inline to a note, alongside your transcribed text.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Quill uses live speech recognition to show your words as you speak. The final transcript is produced on-device by Whisper.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.joevasquez.Quill.iOS</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>quill</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

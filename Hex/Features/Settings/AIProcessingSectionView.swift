@@ -182,6 +182,28 @@ struct AIProcessingSectionView: View {
         } icon: {
           Image(systemName: "mic.badge.plus")
         }
+
+        // Inline edit — if text is selected when you start dictating,
+        // treat the dictation as an edit instruction ("tighten 20%",
+        // "translate to Spanish") and replace the selection in-place.
+        Label {
+          Toggle(
+            "Inline Edit (edit selected text with voice)",
+            isOn: Binding(
+              get: { store.hexSettings.inlineEditEnabled },
+              set: { store.send(.setInlineEditEnabled($0)) }
+            )
+          )
+          if store.hexSettings.inlineEditEnabled {
+            Text("When text is selected in the focused app, your next dictation is treated as an edit instruction and applied to the selection. Try: \"tighten 20%\", \"make it warmer\", \"convert to bullets\", \"translate to Spanish\".")
+              .settingsCaption()
+          } else {
+            Text("Off: all dictations paste as new content (current behavior).")
+              .settingsCaption()
+          }
+        } icon: {
+          Image(systemName: "text.cursor")
+        }
       }
     } header: {
       Text("AI Enhancement")

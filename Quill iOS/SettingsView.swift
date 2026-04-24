@@ -15,6 +15,20 @@ struct SettingsView: View {
   @AppStorage(QuillIOSSettingsKey.selectedModel) private var selectedModel: String = QuillIOSSettingsKey.defaultModel
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
   @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
+  @AppStorage(CustomAIModesStorage.userDefaultsKey) private var customModesData: Data = Data()
+  @AppStorage(IntegrationConnectionStore.userDefaultsKey) private var integrationData: Data = Data()
+
+  private var customModeCountLabel: String {
+    let count = CustomAIModesStorage.decode(customModesData).count
+    if count == 0 { return "None" }
+    return count == 1 ? "1 mode" : "\(count) modes"
+  }
+
+  private var integrationCountLabel: String {
+    let count = IntegrationConnectionStore.decode(integrationData).count
+    let cap = IntegrationLimits.freeTierMaxConnections
+    return "\(count)/\(cap)"
+  }
 
   @State private var apiKeyText: String = ""
   @State private var isAPIKeyVisible: Bool = false
@@ -96,6 +110,42 @@ struct SettingsView: View {
           Text("Dictation")
         } footer: {
           Text("When on, phrases like \"period\", \"comma\", \"new paragraph\", and \"new line\" are converted to punctuation and line breaks as you dictate — instead of being transcribed literally. Applies before AI cleanup.")
+        }
+
+        Section {
+          NavigationLink {
+            CustomModesView()
+          } label: {
+            HStack {
+              Label("Custom Modes", systemImage: "sparkles")
+              Spacer()
+              Text(customModeCountLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+        } header: {
+          Text("AI Modes")
+        } footer: {
+          Text("Create your own transformations — \"Clinical note\", \"VC update\", \"Code review email\" — and pick them from the mode row on the main screen.")
+        }
+
+        Section {
+          NavigationLink {
+            IntegrationsView()
+          } label: {
+            HStack {
+              Label("Integrations", systemImage: "app.connected.to.app.below.fill")
+              Spacer()
+              Text(integrationCountLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+        } header: {
+          Text("Productivity")
+        } footer: {
+          Text("Send dictations into Todoist, Apple Reminders, Notion, Things, Slack, Linear. Free plan includes \(IntegrationLimits.freeTierMaxConnections) — Pro unlocks all.")
         }
 
         Section("About") {

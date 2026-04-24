@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.6
+
+### Fixes
+
+- **macOS: paste is now reliable** (follow-up to the 0.8.5 Accessibility switch).
+  - Some apps (certain Electron inputs, custom-drawn text fields) were accepting our AX insert call without actually applying it — the paste appeared to succeed but nothing showed up. The AX path now reads the element's value before and after the insert and falls through to the clipboard path if nothing changed.
+  - Accessibility permission is now checked **once** at the start of the paste flow. When it's missing, both the AX-insertion path and the Cmd+V injection path are known to silently fail, so Quill skips them and simply leaves the transcription in the clipboard with a clear log line ("Accessibility permission not granted — user must press Cmd+V manually"). No more disappearing dictations.
+  - The clipboard-restore step is also skipped when permission is missing, so your transcription stays in the clipboard instead of being overwritten by your previous contents after a failed auto-paste.
+
 ## 0.8.5
 
 ### Fixes

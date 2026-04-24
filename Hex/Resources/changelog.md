@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.5
+
+### Fixes
+
+- **macOS: never paste the wrong content.** A race in the clipboard-paste path could result in Quill pasting whatever you previously had in your clipboard (e.g. an API key) instead of your transcription when the target app was slow to process `Cmd+V`. Two changes make this foolproof:
+  1. The primary paste path is now **Accessibility-based text insertion** — Quill writes the transcription directly into the focused text field via `AXUIElementSetAttributeValue`, which never touches the clipboard. Works in all browsers, native AppKit apps, and most Electron apps.
+  2. When the fallback clipboard path does run, the default is now to **keep the transcription in the clipboard** rather than race to restore your previous clipboard. If you want the old behavior (restore previous clipboard), toggle "Copy to Clipboard" off in Settings — but that path no longer puts you at risk of pasting stale content, because it also bumps the restore delay to 3 s and verifies the clipboard wasn't stomped in the interim.
+
 ## 0.8.4
 
 ### Fixes

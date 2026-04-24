@@ -76,7 +76,12 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		preventSystemSleep: Bool = true,
 		recordingAudioBehavior: RecordingAudioBehavior = .doNothing,
 		minimumKeyTime: Double = HexCoreConstants.defaultMinimumKeyTime,
-		copyToClipboard: Bool = false,
+		// Default changed from `false` → `true` in 0.8.5: leaving the
+		// transcription in the clipboard is safer than restoring the
+		// user's previous clipboard (which races the target app's
+		// paste handler and can result in pasting sensitive content
+		// like API keys when a paste completes late).
+		copyToClipboard: Bool = true,
 		superFastModeEnabled: Bool = false,
 		useDoubleTapOnly: Bool = false,
 		doubleTapLockEnabled: Bool = true,

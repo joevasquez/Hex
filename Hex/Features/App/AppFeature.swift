@@ -402,6 +402,31 @@ struct AppView: View {
           .navigationTitle("About")
       }
     }
+    .sheet(isPresented: Binding(
+      get: { !store.settings.hexSettings.hasCompletedOnboarding },
+      set: { newValue in
+        // The onboarding view fires `.markOnboardingComplete` itself
+        // when it dismisses; this setter just handles the case where
+        // SwiftUI dismisses the sheet for some other reason.
+        if newValue == false {
+          store.send(.settings(.markOnboardingComplete))
+        }
+      }
+    )) {
+      OnboardingView(
+        store: store.scope(state: \.settings, action: \.settings),
+        microphonePermission: store.microphonePermission,
+        accessibilityPermission: store.accessibilityPermission,
+        inputMonitoringPermission: store.inputMonitoringPermission,
+        onDismiss: {
+          // Already marked complete inside `OnboardingView.complete`,
+          // but the SwiftUI sheet binding needs us to flip its
+          // `isPresented` source-of-truth, which we do by sending
+          // the same action defensively.
+          store.send(.settings(.markOnboardingComplete))
+        }
+      )
+    }
     .enableInjection()
   }
 

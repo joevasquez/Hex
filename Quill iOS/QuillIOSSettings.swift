@@ -16,6 +16,11 @@ enum QuillIOSSettingsKey {
   /// post-processing runs. Mirrors the macOS `voiceCommandsEnabled`
   /// HexSettings flag.
   static let voiceCommandsEnabled = "quill.voiceCommandsEnabled"
+  /// Set to `true` once the user finishes (or skips through) the
+  /// first-launch walk-through in `OnboardingView`. Toggle back to
+  /// `false` from Settings → Productivity → Replay Tutorial to
+  /// re-enter the flow.
+  static let hasCompletedOnboarding = "quill.hasCompletedOnboarding"
 
   // Defaults
   static let defaultModel = "openai_whisper-tiny.en"  // Ships small, English-focused

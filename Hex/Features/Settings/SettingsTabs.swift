@@ -48,6 +48,21 @@ struct GeneralSettingsTabView: View {
       SoundSectionView(store: store)
       GeneralSectionView(store: store)
       HistorySectionView(store: store)
+
+      // Welcome-tour replay — sits at the bottom of General because
+      // it's the catchall settings tab and this is a low-frequency
+      // action that doesn't deserve its own section header.
+      Section {
+        Button {
+          store.send(.replayOnboarding)
+        } label: {
+          Label("Replay Tutorial", systemImage: "sparkle.magnifyingglass")
+        }
+      } footer: {
+        Text("Re-runs the first-launch welcome walk-through.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
     }
     .formStyle(.grouped)
     .task { await store.send(.task).finish() }

@@ -148,6 +148,20 @@ struct SettingsView: View {
           Text("Send dictations into Todoist, Apple Reminders, Notion, Things, Slack, Linear. Free plan includes \(IntegrationLimits.freeTierMaxConnections) — Pro unlocks all.")
         }
 
+        Section {
+          Button {
+            // Flipping this flag triggers the
+            // `.fullScreenCover` in `QuilliOSApp` to re-present
+            // the onboarding flow.
+            UserDefaults.standard.set(false, forKey: QuillIOSSettingsKey.hasCompletedOnboarding)
+            dismiss()
+          } label: {
+            Label("Replay Tutorial", systemImage: "sparkle.magnifyingglass")
+          }
+        } footer: {
+          Text("Re-runs the welcome walk-through.")
+        }
+
         Section("About") {
           Label("Quill for iOS · v0.1.0", systemImage: "info.circle")
             .font(.caption)

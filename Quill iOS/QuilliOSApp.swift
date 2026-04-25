@@ -15,12 +15,26 @@ struct QuilliOSApp: App {
   /// the notes list". See `QuillDeepLink` for the routing table.
   @StateObject private var deepLinkRouter = QuillDeepLinkRouter()
 
+  @AppStorage(QuillIOSSettingsKey.hasCompletedOnboarding)
+  private var hasCompletedOnboarding: Bool = false
+
   var body: some Scene {
     WindowGroup {
       ContentView()
         .environmentObject(deepLinkRouter)
         .onOpenURL { url in
           deepLinkRouter.handle(url)
+        }
+        // First-launch walk-through. Modal full-screen so the user
+        // can't tap around the main UI before granting at least
+        // microphone permission. The bound flag flips to true once
+        // they finish or skip-through; resetting it (Settings →
+        // Productivity → Replay Tutorial) re-enters the flow.
+        .fullScreenCover(isPresented: Binding(
+          get: { !hasCompletedOnboarding },
+          set: { newValue in hasCompletedOnboarding = !newValue }
+        )) {
+          OnboardingView(hasCompletedOnboarding: $hasCompletedOnboarding)
         }
     }
   }

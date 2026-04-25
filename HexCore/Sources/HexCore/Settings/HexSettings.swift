@@ -69,6 +69,10 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	/// appended. Off by default — changes the dictation behavior
 	/// enough that users should opt in.
 	public var inlineEditEnabled: Bool
+	/// Set to `true` once the user finishes (or skips through) the
+	/// first-launch onboarding walk-through. Resetting it to `false`
+	/// from Settings → General → "Replay Tutorial" re-enters the flow.
+	public var hasCompletedOnboarding: Bool
 
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
@@ -115,7 +119,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		contextEnrichmentEnabled: Bool = false,
 		liveTranscriptEnabled: Bool = false,
 		customAIModes: [CustomAIMode] = [],
-		inlineEditEnabled: Bool = false
+		inlineEditEnabled: Bool = false,
+		hasCompletedOnboarding: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -151,6 +156,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.liveTranscriptEnabled = liveTranscriptEnabled
 		self.customAIModes = customAIModes
 		self.inlineEditEnabled = inlineEditEnabled
+		self.hasCompletedOnboarding = hasCompletedOnboarding
 		normalizeDoubleTapSettings()
 	}
 
@@ -209,6 +215,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case liveTranscriptEnabled
 	case customAIModes
 	case inlineEditEnabled
+	case hasCompletedOnboarding
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -352,6 +359,7 @@ private enum HexSettingsSchema {
 		SettingsField(.liveTranscriptEnabled, keyPath: \.liveTranscriptEnabled, default: defaults.liveTranscriptEnabled).eraseToAny(),
 		SettingsField(.customAIModes, keyPath: \.customAIModes, default: defaults.customAIModes).eraseToAny(),
 		SettingsField(.inlineEditEnabled, keyPath: \.inlineEditEnabled, default: defaults.inlineEditEnabled).eraseToAny(),
+		SettingsField(.hasCompletedOnboarding, keyPath: \.hasCompletedOnboarding, default: defaults.hasCompletedOnboarding).eraseToAny(),
 	]
 }
 

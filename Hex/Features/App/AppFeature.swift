@@ -298,6 +298,73 @@ private enum SidebarMode: String, CaseIterable, Identifiable {
     case .history: "History"
     }
   }
+  var icon: String {
+    switch self {
+    case .settings: "gearshape.fill"
+    case .history:  "clock.fill"
+    }
+  }
+}
+
+/// Custom two-segment toggle for switching between Settings and
+/// History modes. Animated "thumb" slides under the selected option.
+/// Uses brand-tinted purple for the selected fill so it harmonizes
+/// with the rest of the app and reads as a proper UI control rather
+/// than a generic system segmented picker.
+private struct SidebarModeToggle: View {
+  let mode: SidebarMode
+  let onSelect: (SidebarMode) -> Void
+  /// Geometry IDs for the matched-geometry "thumb" animation.
+  @Namespace private var thumbNamespace
+
+  var body: some View {
+    HStack(spacing: 0) {
+      ForEach(SidebarMode.allCases) { option in
+        let isSelected = option == mode
+        Button {
+          guard option != mode else { return }
+          withAnimation(.spring(duration: 0.32, bounce: 0.18)) {
+            onSelect(option)
+          }
+        } label: {
+          HStack(spacing: 6) {
+            Image(systemName: option.icon)
+              .font(.system(size: 11, weight: .semibold))
+            Text(option.title)
+              .font(.system(size: 13, weight: .semibold))
+          }
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 7)
+          .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.7))
+          .background {
+            if isSelected {
+              RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(
+                  LinearGradient(
+                    colors: [
+                      Color.purple.opacity(0.95),
+                      Color(red: 0.40, green: 0.20, blue: 0.65),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                  )
+                )
+                .shadow(color: Color.purple.opacity(0.35), radius: 4, y: 1)
+                .matchedGeometryEffect(id: "thumb", in: thumbNamespace)
+            }
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+      }
+    }
+    .padding(3)
+    .background(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(Color.primary.opacity(0.08))
+    )
+    .frame(maxWidth: .infinity)
+  }
 }
 
 struct AppView: View {
@@ -315,16 +382,16 @@ struct AppView: View {
   var body: some View {
     NavigationSplitView(columnVisibility: $columnVisibility) {
       VStack(alignment: .leading, spacing: 0) {
-        // Mode pills — Settings vs History as two top-level
-        // destinations. Picking History collapses the sidebar so
-        // the transcript list + detail get the full pane.
-        Picker("Mode", selection: Binding(
-          get: { sidebarMode },
-          set: { newMode in
+        // Mode pills — custom segmented control with brand-tinted
+        // selection, animated thumb, and SF Symbols on each side.
+        // Replaces the default `.segmented` picker style which felt
+        // utilitarian and didn't visually center within the
+        // sidebar's leading-aligned VStack.
+        SidebarModeToggle(
+          mode: sidebarMode,
+          onSelect: { newMode in
             switch newMode {
             case .settings:
-              // Pick a sensible default sub-tab when arriving from
-              // History. General is the safe landing.
               if store.state.activeTab == .history {
                 store.send(.setActiveTab(.general))
               }
@@ -332,15 +399,10 @@ struct AppView: View {
               store.send(.setActiveTab(.history))
             }
           }
-        )) {
-          ForEach(SidebarMode.allCases) { mode in
-            Text(mode.title).tag(mode)
-          }
-        }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
+        )
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
 
         // Sub-tabs — only meaningful in Settings mode. We render
         // an empty placeholder in History mode so the sidebar

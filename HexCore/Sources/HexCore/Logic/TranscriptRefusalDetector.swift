@@ -34,26 +34,54 @@ public enum TranscriptRefusalDetector {
   /// period, etc.) so "I am a speaker" doesn't match "i am a" but
   /// "I am a language model" does. All comparisons are case-insensitive.
   private static let refusalPrefixes: [String] = [
+    // Self-identification refusals
     "i am a",
     "i'm a",
+    "i am an",
+    "i'm an",
+    "as an ai",
+    "as a text",
+    "as a language model",
+    "my purpose is",
+    "my role is",
+    // Capability refusals
     "i cannot",
     "i can't",
     "i am unable",
     "i'm unable",
     "i am not able",
     "i'm not able",
-    "as an ai",
-    "as a text",
-    "as a language model",
+    "i don't have",
+    "i do not have",
+    // Apologies
     "i apologize",
     "i'm sorry",
     "i am sorry",
-    "please direct",
     "sorry, i",
-    "i don't have",
-    "i do not have",
-    "my purpose is",
-    "my role is",
+    "sorry but",
+    // Asking the user for content (the model is having a
+    // conversation instead of transforming text)
+    "could you please provide",
+    "could you please share",
+    "could you provide",
+    "could you share",
+    "could you clarify",
+    "please provide",
+    "please share",
+    "please paste",
+    "please clarify",
+    "please direct",
+    "please send",
+    "i'd be happy to",
+    "i would be happy to",
+    "happy to help once",
+    "once you share",
+    "once you provide",
+    "to clarify,",
+    "to clarify:",
+    // Generic "I'll wait for content"
+    "i'll wait",
+    "i will wait",
   ]
 
   /// Returns true if `response` starts with one of the known refusal

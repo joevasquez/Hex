@@ -119,7 +119,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		contextEnrichmentEnabled: Bool = false,
 		liveTranscriptEnabled: Bool = false,
 		customAIModes: [CustomAIMode] = [],
-		inlineEditEnabled: Bool = false,
+		inlineEditEnabled: Bool = true,
 		hasCompletedOnboarding: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled

@@ -95,6 +95,9 @@ xcodebuild \
   -destination 'generic/platform=iOS' \
   -archivePath "$BUILD_DIR/QuillIOS.xcarchive" \
   -allowProvisioningUpdates \
+  -authenticationKeyPath "$API_KEY_PATH" \
+  -authenticationKeyID "$API_KEY_ID" \
+  -authenticationKeyIssuerID "$API_ISSUER_ID" \
   archive | grep -E "(error:|\*\* [A-Z]+ [A-Z]+ \*\*)" || true
 
 if [ ! -d "$BUILD_DIR/QuillIOS.xcarchive" ]; then
@@ -125,6 +128,9 @@ xcodebuild -exportArchive \
   -exportPath "$BUILD_DIR/export" \
   -exportOptionsPlist "$BUILD_DIR/ExportOptions.plist" \
   -allowProvisioningUpdates \
+  -authenticationKeyPath "$API_KEY_PATH" \
+  -authenticationKeyID "$API_KEY_ID" \
+  -authenticationKeyIssuerID "$API_ISSUER_ID" \
   | grep -E "(error:|\*\* [A-Z]+ [A-Z]+ \*\*)" || true
 
 # Export writes a .ipa named after the scheme (replacing space + TARGET_NAME

@@ -18,20 +18,6 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
-	<key>CFBundleVersion</key>
-	<string>7</string>
-	<key>LSRequiresIPhoneOS</key>
-	<true/>
-	<key>NSCameraUsageDescription</key>
-	<string>Quill uses the camera so you can take a photo and attach it inline to your note — e.g. snapping a slide at a talk between dictations.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Quill tags each new note with your rough location (neighborhood) so you can remember where a thought started. Optional — decline to record notes without a location.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Quill needs microphone access to transcribe your voice notes.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Quill lets you attach photos from your library inline to a note, alongside your transcribed text.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Quill uses live speech recognition to show your words as you speak. The final transcript is produced on-device by Whisper.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -45,6 +31,20 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleVersion</key>
+	<string>15</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Quill uses the camera so you can take a photo and attach it inline to your note — e.g. snapping a slide at a talk between dictations.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Quill tags each new note with your rough location (neighborhood) so you can remember where a thought started. Optional — decline to record notes without a location.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Quill needs microphone access to transcribe your voice notes.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Quill lets you attach photos from your library inline to a note, alongside your transcribed text.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Quill uses live speech recognition to show your words as you speak. The final transcript is produced on-device by Whisper.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

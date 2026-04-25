@@ -27,6 +27,14 @@ struct InlineEditClient {
   /// focused, or the selection is empty.
   var captureSelection: @Sendable () async -> String? = { nil }
 
+  /// Synchronous capture variant. Designed to be called from the
+  /// reducer at the *instant* of hotkey press — before any async
+  /// `.run` effect schedules and before `contextClient.captureContext`
+  /// (which can take 100+ ms doing AppleScript) gets a chance to
+  /// run and let focus drift. AX queries are main-thread-safe, so
+  /// this is fine to call directly from the reducer.
+  var captureSelectionSync: @Sendable () -> String? = { nil }
+
   /// Replace the selected text in the focused element with `text`,
   /// returning true on success. Uses the same AX mechanism the
   /// PasteboardClient uses for its primary paste path, so it works
@@ -38,7 +46,13 @@ extension InlineEditClient: DependencyKey {
   static var liveValue: Self {
     return .init(
       captureSelection: {
-        await MainActor.run { captureSelectionSync() }
+        await MainActor.run { _captureSelectionFromAX() }
+      },
+      captureSelectionSync: {
+        // Reducers run on the main actor, so we don't need to hop
+        // through MainActor.run here — just call straight through
+        // to the AX-talking helper.
+        MainActor.assumeIsolated { _captureSelectionFromAX() }
       },
       replaceSelection: { text in
         await MainActor.run { replaceSelectionSync(with: text) }
@@ -57,9 +71,9 @@ extension DependencyValues {
 // MARK: - Live AX implementation
 
 @MainActor
-private func captureSelectionSync() -> String? {
+private func _captureSelectionFromAX() -> String? {
   guard AXIsProcessTrusted() else {
-    inlineEditLogger.warning("Inline edit: AX permission missing; cannot read selection")
+    inlineEditLogger.notice("Inline edit: AX permission missing; cannot read selection. Grant Accessibility in System Settings → Privacy & Security.")
     return nil
   }
 
@@ -69,7 +83,7 @@ private func captureSelectionSync() -> String? {
     systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
   )
   guard focusStatus == .success, let focusedRef else {
-    inlineEditLogger.debug("Inline edit: no focused element")
+    inlineEditLogger.info("Inline edit: AX could not find a focused element (status=\(focusStatus.rawValue)). Inline edit will be skipped — dictation will paste normally.")
     return nil
   }
   let focused = focusedRef as! AXUIElement
@@ -79,12 +93,17 @@ private func captureSelectionSync() -> String? {
     focused, kAXSelectedTextAttribute as CFString, &selRef
   )
   guard selStatus == .success, let selection = selRef as? String else {
-    inlineEditLogger.debug("Inline edit: focused element has no selected text attribute")
+    inlineEditLogger.info("Inline edit: focused element doesn't expose kAXSelectedTextAttribute (status=\(selStatus.rawValue)). The hosting app may not support AX text selection — inline edit will be skipped.")
     return nil
   }
 
   let trimmed = selection.trimmingCharacters(in: .whitespacesAndNewlines)
-  return trimmed.isEmpty ? nil : selection
+  if trimmed.isEmpty {
+    inlineEditLogger.info("Inline edit: focused element has empty / whitespace-only selection. Skipping inline edit — dictation will paste normally.")
+    return nil
+  }
+  inlineEditLogger.info("Inline edit: captured selection (\(selection.count) chars)")
+  return selection
 }
 
 @MainActor

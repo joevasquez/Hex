@@ -370,6 +370,21 @@ private extension TranscriptionFeature {
     state.capturedContext = nil
     state.partialTranscript = ""
     state.inlineEditSelection = nil
+
+    // Capture the focused-element selection synchronously, RIGHT
+    // NOW, while the user's app still has focus and before any
+    // async effect work (sound, sleep prevention, AppleScript
+    // context capture) gets a chance to let focus drift. AX calls
+    // are main-thread-safe, the reducer runs on the main actor —
+    // no async hop required. See InlineEditClient.captureSelectionSync.
+    if state.hexSettings.inlineEditEnabled {
+      if let selection = inlineEdit.captureSelectionSync() {
+        state.inlineEditSelection = selection
+        transcriptionFeatureLogger.info("Inline edit: captured selection at hotkey-press (\(selection.count) chars)")
+      } else {
+        transcriptionFeatureLogger.info("Inline edit enabled but no selection captured — dictation will follow the normal paste path.")
+      }
+    }
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
 
     let contextEnrichmentEnabled = state.hexSettings.contextEnrichmentEnabled && state.hexSettings.aiProcessingEnabled
@@ -377,12 +392,19 @@ private extension TranscriptionFeature {
     // here — the live transcription effect is disabled (see note below). Re-introduce
     // them when the streaming path returns.
 
-    let inlineEditEnabled = state.hexSettings.inlineEditEnabled
-    // Prevent system sleep during recording
+    // Prevent system sleep during recording.
+    //
+    // Note: inline-edit selection capture used to live inside this
+    // effect, but it's been moved up into the reducer body above so
+    // the AX query happens at the *instant* of hotkey press rather
+    // than after the effect-task spin-up + sleep prevention +
+    // context capture (the latter can take 100+ ms). That removes
+    // a class of race conditions where focus drifted before AX
+    // could read the selection.
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
       .cancel(id: CancelID.liveTranscription),
-      .run { [sleepManagement, contextClient, inlineEdit, preventSleep = state.hexSettings.preventSystemSleep] send in
+      .run { [sleepManagement, contextClient, preventSleep = state.hexSettings.preventSystemSleep] send in
         // Play sound immediately for instant feedback
         soundEffect.play(.startRecording)
 
@@ -394,14 +416,6 @@ private extension TranscriptionFeature {
         if contextEnrichmentEnabled {
           let context = await contextClient.captureContext()
           await send(.contextCaptured(context))
-        }
-
-        // Inline-edit: if the user has a selection in the focused
-        // app AND they've opted into inline-edit, capture it now
-        // (before focus potentially shifts) so we can route the
-        // dictation as an edit instruction at finalize time.
-        if inlineEditEnabled, let selection = await inlineEdit.captureSelection() {
-          await send(.inlineEditSelectionCaptured(selection))
         }
 
         await recording.startRecording()
@@ -605,6 +619,20 @@ private extension TranscriptionFeature {
     let capturedContext = state.capturedContext
     let transcriptionHistory = state.$transcriptionHistory
     let inlineEditSelection = state.inlineEditSelection
+
+    // Decision-tree log — emitted before every finalize so we can
+    // see at a glance which branch (inline-edit vs normal paste)
+    // is taken and why. Surfaces in Console.app under the
+    // `com.joevasquez.Quill` subsystem.
+    let _inlineEditEnabled = state.hexSettings.inlineEditEnabled
+    let _selectionLabel: String = {
+      guard let sel = inlineEditSelection else { return "nil" }
+      return "captured(\(sel.count) chars)"
+    }()
+    let _previewSnippet = String(modifiedResult.prefix(80))
+    transcriptionFeatureLogger.info(
+      "Finalize: inlineEditEnabled=\(_inlineEditEnabled) inlineEditSelection=\(_selectionLabel) aiEnabled=\(aiEnabled) mode=\(resolvedMode.rawValue) preview=\"\(_previewSnippet, privacy: .private)\""
+    )
 
     // Inline-edit branch: user had text selected when they started
     // dictating AND inlineEditEnabled is on. Skip the normal AI mode

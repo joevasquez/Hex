@@ -307,10 +307,17 @@ private enum SidebarMode: String, CaseIterable, Identifiable {
 }
 
 /// Custom two-segment toggle for switching between Settings and
-/// History modes. Animated "thumb" slides under the selected option.
-/// Uses brand-tinted purple for the selected fill so it harmonizes
-/// with the rest of the app and reads as a proper UI control rather
-/// than a generic system segmented picker.
+/// History modes. Text-only — earlier revision included SF Symbols
+/// next to each label, but at typical sidebar widths the icons
+/// crowded the labels enough to force them onto two lines
+/// ("Setti / ngs"). Dropping the icons gave each pill enough
+/// horizontal room to read cleanly while matching the
+/// minimalist look of macOS sidebar tab pickers.
+///
+/// A `matchedGeometryEffect` "thumb" slides between the two
+/// options on selection. The active pill uses a softened purple
+/// gradient that harmonizes with the rest of the app's brand tint
+/// without screaming.
 private struct SidebarModeToggle: View {
   let mode: SidebarMode
   let onSelect: (SidebarMode) -> Void
@@ -327,41 +334,39 @@ private struct SidebarModeToggle: View {
             onSelect(option)
           }
         } label: {
-          HStack(spacing: 6) {
-            Image(systemName: option.icon)
-              .font(.system(size: 11, weight: .semibold))
-            Text(option.title)
-              .font(.system(size: 13, weight: .semibold))
-          }
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, 7)
-          .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.7))
-          .background {
-            if isSelected {
-              RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(
-                  LinearGradient(
-                    colors: [
-                      Color.purple.opacity(0.95),
-                      Color(red: 0.40, green: 0.20, blue: 0.65),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
+          Text(option.title)
+            .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+            .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.72))
+            .lineLimit(1)
+            .minimumScaleFactor(0.9)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background {
+              if isSelected {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                  .fill(
+                    LinearGradient(
+                      colors: [
+                        Color.purple.opacity(0.85),
+                        Color(red: 0.42, green: 0.22, blue: 0.62),
+                      ],
+                      startPoint: .top,
+                      endPoint: .bottom
+                    )
                   )
-                )
-                .shadow(color: Color.purple.opacity(0.35), radius: 4, y: 1)
-                .matchedGeometryEffect(id: "thumb", in: thumbNamespace)
+                  .shadow(color: Color.purple.opacity(0.25), radius: 3, y: 1)
+                  .matchedGeometryEffect(id: "thumb", in: thumbNamespace)
+              }
             }
-          }
-          .contentShape(Rectangle())
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
       }
     }
-    .padding(3)
+    .padding(2)
     .background(
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(Color.primary.opacity(0.08))
+      RoundedRectangle(cornerRadius: 9, style: .continuous)
+        .fill(Color.primary.opacity(0.07))
     )
     .frame(maxWidth: .infinity)
   }

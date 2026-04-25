@@ -45,12 +45,6 @@ struct AboutView: View {
                     Spacer()
                     Link("joevasquez.com", destination: URL(string: "https://joevasquez.com")!)
                 }
-
-                HStack {
-                    Label("Based on Hex by Kit Langton", systemImage: "arrow.triangle.branch")
-                    Spacer()
-                    Link("Original project", destination: URL(string: "https://github.com/kitlangton/Hex")!)
-                }
             }
         }
         .formStyle(.grouped)

@@ -14,9 +14,25 @@ import SwiftUI
 @Reducer
 struct AppFeature {
   enum ActiveTab: Equatable {
-    case settings
+    /// General settings: permissions, sound, general (login, dock,
+    /// sleep), and history-retention configuration. The "catchall"
+    /// landing tab.
+    case general
+    /// Recording-specific settings: Whisper/Parakeet model, output
+    /// language, hotkey configuration, microphone selection.
+    case recording
+    /// AI post-processing settings: API keys, modes, voice commands,
+    /// inline edit, custom user-authored modes.
+    case ai
+    /// Integration connections (Todoist, Apple Reminders, Notion,
+    /// Things, Slack, Linear). Frontend-only as of 0.9.x — connection
+    /// state is persisted but send adapters land in a follow-up.
+    case integrations
+    /// Word remapping / removal scratchpad (legacy name "transforms").
     case remappings
+    /// Transcription history viewer.
     case history
+    /// About / version / Sparkle update info.
     case about
   }
 
@@ -25,7 +41,7 @@ struct AppFeature {
 		var transcription: TranscriptionFeature.State = .init()
 		var settings: SettingsFeature.State = .init()
 		var history: HistoryFeature.State = .init()
-		var activeTab: ActiveTab = .settings
+		var activeTab: ActiveTab = .general
 		@Shared(.hexSettings) var hexSettings: HexSettings
 		@Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
 
@@ -99,8 +115,10 @@ struct AppFeature {
         }
         
       case .transcription(.modelMissing):
-        HexLog.app.notice("Model missing - activating app and switching to settings")
-        state.activeTab = .settings
+        HexLog.app.notice("Model missing - activating app and switching to Recording settings")
+        // The model selector now lives in the Recording tab (split
+        // out of the old monolithic Settings page in 0.9.x).
+        state.activeTab = .recording
         state.settings.shouldFlashModelSection = true
         return .run { send in
           await MainActor.run {
@@ -118,7 +136,7 @@ struct AppFeature {
         return .none
 
       case .history(.navigateToSettings):
-        state.activeTab = .settings
+        state.activeTab = .general
         return .none
       case .history:
         return .none
@@ -266,55 +284,113 @@ struct AppFeature {
 
 }
 
+/// Top-level "mode" the sidebar is in. The user toggles between
+/// these via a segmented control at the top of the sidebar — when
+/// Settings is selected the sidebar lists configuration sub-tabs,
+/// when History is selected the sidebar collapses so the transcript
+/// list and detail get the full window width.
+private enum SidebarMode: String, CaseIterable, Identifiable {
+  case settings, history
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .settings: "Settings"
+    case .history: "History"
+    }
+  }
+}
+
 struct AppView: View {
   @Bindable var store: StoreOf<AppFeature>
   @State private var columnVisibility = NavigationSplitViewVisibility.automatic
+  /// Resolved from `store.activeTab` so sub-tab clicks keep the
+  /// sidebar in the right mode without an extra source of truth.
+  private var sidebarMode: SidebarMode {
+    switch store.state.activeTab {
+    case .history: .history
+    default: .settings
+    }
+  }
 
   var body: some View {
     NavigationSplitView(columnVisibility: $columnVisibility) {
-      List(selection: $store.activeTab) {
-        Button {
-          store.send(.setActiveTab(.settings))
-        } label: {
-          Label("Settings", systemImage: "gearshape")
+      VStack(alignment: .leading, spacing: 0) {
+        // Mode pills — Settings vs History as two top-level
+        // destinations. Picking History collapses the sidebar so
+        // the transcript list + detail get the full pane.
+        Picker("Mode", selection: Binding(
+          get: { sidebarMode },
+          set: { newMode in
+            switch newMode {
+            case .settings:
+              // Pick a sensible default sub-tab when arriving from
+              // History. General is the safe landing.
+              if store.state.activeTab == .history {
+                store.send(.setActiveTab(.general))
+              }
+            case .history:
+              store.send(.setActiveTab(.history))
+            }
+          }
+        )) {
+          ForEach(SidebarMode.allCases) { mode in
+            Text(mode.title).tag(mode)
+          }
         }
-        .buttonStyle(.plain)
-        .tag(AppFeature.ActiveTab.settings)
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
 
-        Button {
-          store.send(.setActiveTab(.remappings))
-        } label: {
-          Label("Transforms", systemImage: "text.badge.plus")
+        // Sub-tabs — only meaningful in Settings mode. We render
+        // an empty placeholder in History mode so the sidebar
+        // stays a stable width and the pills don't shift.
+        if sidebarMode == .settings {
+          List(selection: $store.activeTab) {
+            tabRow(.general, label: "General", icon: "gearshape")
+            tabRow(.recording, label: "Recording", icon: "mic.circle")
+            tabRow(.ai, label: "AI", icon: "sparkles")
+            tabRow(.integrations, label: "Integrations", icon: "app.connected.to.app.below.fill")
+            tabRow(.remappings, label: "Transforms", icon: "text.badge.plus")
+            tabRow(.about, label: "About", icon: "info.circle")
+          }
+          .listStyle(.sidebar)
+        } else {
+          // Subtle hint that the sidebar is intentionally empty
+          // while History owns the right pane.
+          Spacer()
+          HStack {
+            Spacer()
+            Text("Showing all transcripts")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Spacer()
+          }
+          .padding(.bottom, 16)
         }
-        .buttonStyle(.plain)
-        .tag(AppFeature.ActiveTab.remappings)
-
-        Button {
-          store.send(.setActiveTab(.history))
-        } label: {
-          Label("History", systemImage: "clock")
-        }
-        .buttonStyle(.plain)
-        .tag(AppFeature.ActiveTab.history)
-
-        Button {
-          store.send(.setActiveTab(.about))
-        } label: {
-          Label("About", systemImage: "info.circle")
-        }
-        .buttonStyle(.plain)
-        .tag(AppFeature.ActiveTab.about)
       }
     } detail: {
       switch store.state.activeTab {
-      case .settings:
-        SettingsView(
+      case .general:
+        GeneralSettingsTabView(
           store: store.scope(state: \.settings, action: \.settings),
           microphonePermission: store.microphonePermission,
           accessibilityPermission: store.accessibilityPermission,
           inputMonitoringPermission: store.inputMonitoringPermission
         )
-        .navigationTitle("Settings")
+        .navigationTitle("General")
+      case .recording:
+        RecordingSettingsTabView(
+          store: store.scope(state: \.settings, action: \.settings),
+          microphonePermission: store.microphonePermission
+        )
+        .navigationTitle("Recording")
+      case .ai:
+        AISettingsTabView(store: store.scope(state: \.settings, action: \.settings))
+          .navigationTitle("AI")
+      case .integrations:
+        IntegrationsSettingsTabView(store: store.scope(state: \.settings, action: \.settings))
+          .navigationTitle("Integrations")
       case .remappings:
         WordRemappingsView(store: store.scope(state: \.settings, action: \.settings))
           .navigationTitle("Transforms")
@@ -327,5 +403,19 @@ struct AppView: View {
       }
     }
     .enableInjection()
+  }
+
+  /// Sidebar row builder. Encodes the consistent button-as-row
+  /// pattern used by every entry in the navigation list and keeps
+  /// the call sites readable.
+  @ViewBuilder
+  private func tabRow(_ tab: AppFeature.ActiveTab, label: String, icon: String) -> some View {
+    Button {
+      store.send(.setActiveTab(tab))
+    } label: {
+      Label(label, systemImage: icon)
+    }
+    .buttonStyle(.plain)
+    .tag(tab)
   }
 }

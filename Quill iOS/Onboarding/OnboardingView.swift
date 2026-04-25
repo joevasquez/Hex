@@ -58,6 +58,21 @@ struct OnboardingView: View {
       .animation(.spring(duration: 0.45, bounce: 0.2), value: step)
 
       VStack {
+        // Top-right "Skip" — visible on every step so users don't
+        // feel trapped. Skipping persists `hasCompletedOnboarding`
+        // so the flow doesn't re-present on next launch.
+        HStack {
+          Spacer()
+          Button("Skip", action: complete)
+            .buttonStyle(.plain)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .padding(.top, 18)
+            .padding(.trailing, 18)
+        }
         Spacer()
         StepDots(currentStep: step.rawValue, total: OnboardingStep.allCases.count)
           .padding(.bottom, 28)

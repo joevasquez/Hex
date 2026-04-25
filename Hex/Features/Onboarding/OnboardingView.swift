@@ -76,6 +76,24 @@ struct OnboardingView: View {
       .animation(.spring(duration: 0.45, bounce: 0.2), value: step)
 
       VStack {
+        // Top-right "Skip" — visible on every step. Lets a power
+        // user (or anyone re-entering the flow) jump straight to
+        // the main app. Skipping still flips
+        // `hasCompletedOnboarding` so we don't re-present.
+        HStack {
+          Spacer()
+          Button("Skip", action: complete)
+            .buttonStyle(.plain)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(
+              Capsule().fill(Color.white.opacity(0.12))
+            )
+            .padding(.top, 18)
+            .padding(.trailing, 18)
+        }
         Spacer()
         StepDots(currentStep: step.rawValue, total: Step.allCases.count)
           .padding(.bottom, 28)
@@ -225,17 +243,18 @@ private struct PermissionsStep: View {
   let inputMonitoringPermission: PermissionStatus
   let onContinue: () -> Void
 
-  private var allGranted: Bool {
-    microphonePermission == .granted
-      && accessibilityPermission == .granted
-      && inputMonitoringPermission == .granted
+  /// Continue is gated on the two *required* permissions only.
+  /// Input Monitoring is intentionally NOT required here — see the
+  /// long comment below the Input Monitoring row for why.
+  private var requiredGranted: Bool {
+    microphonePermission == .granted && accessibilityPermission == .granted
   }
 
   var body: some View {
     VStack(spacing: 18) {
       stepHeader(
-        title: "Three quick permissions",
-        subtitle: "Quill needs these to listen, paste, and respond to your hotkey. Click each row to grant."
+        title: "A couple of permissions",
+        subtitle: "Quill needs Microphone + Accessibility to capture and paste. Input Monitoring is optional — you can grant it later when you set up a hotkey."
       )
 
       Spacer().frame(height: 12)
@@ -254,19 +273,29 @@ private struct PermissionsStep: View {
         state: accessibilityPermission,
         action: { store.send(.requestAccessibility) }
       )
+
+      // Input Monitoring is left as optional during onboarding for a
+      // very specific reason: granting it triggers a system-level
+      // "Quill must quit to apply this change" dialog. If the user
+      // OKs that mid-onboarding, the app relaunches and the in-memory
+      // step state resets — they start over from "Welcome." Asking
+      // for it here costs more friction than benefit; the user gets
+      // through onboarding quickly with mic + AX, and we revisit IM
+      // when they actually configure a hotkey from the Recording tab.
       PermissionRow(
         title: "Input Monitoring",
-        subtitle: "Required — listen for your global hotkey.",
+        subtitle: "Optional — only needed for global hotkeys. Quill may need to quit and reopen after this is granted, so do it later from Settings → Recording.",
         systemImage: "keyboard",
         state: inputMonitoringPermission,
         action: { store.send(.requestInputMonitoring) }
       )
+      .opacity(0.85)
 
       Spacer()
 
       OnboardingButton(
-        allGranted ? "Continue" : "Grant permissions to continue",
-        isDisabled: !allGranted,
+        requiredGranted ? "Continue" : "Grant Microphone + Accessibility to continue",
+        isDisabled: !requiredGranted,
         action: onContinue
       )
       .padding(.horizontal, 32)

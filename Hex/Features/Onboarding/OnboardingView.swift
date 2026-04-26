@@ -217,21 +217,11 @@ private struct WelcomeStep: View {
     }
   }
 
-  /// Build a template feather NSImage on the fly so it tints white
-  /// against the gradient background. Same approach as the menu bar
-  /// icon — see `HexApp.menuBarIcon`.
-  private var featherImage: NSImage {
-    let side: CGFloat = 130
-    guard let source = NSImage(named: "Feather") else { return NSImage() }
-    let scaled = NSImage(size: NSSize(width: side, height: side))
-    let rect = NSRect(x: 0, y: 0, width: side, height: side)
-    scaled.lockFocus()
-    source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-    NSColor.white.setFill()
-    rect.fill(using: .sourceIn)
-    scaled.unlockFocus()
-    return scaled
-  }
+  /// Pre-rendered white feather. Cached at file scope (see
+  /// `OnboardingFeather`) so it isn't redrawn on every SwiftUI body
+  /// recomputation — animations cause many recomputations per
+  /// second, and `lockFocus`/`unlockFocus` is genuinely expensive.
+  private var featherImage: NSImage { OnboardingFeather.image(side: 130) }
 }
 
 // MARK: - Step 2: Permissions
@@ -479,8 +469,30 @@ private struct DoneStep: View {
     return CGSize(width: Foundation.cos(angle) * radius, height: Foundation.sin(angle) * radius)
   }
 
-  private var featherImage: NSImage {
-    let side: CGFloat = 110
+  private var featherImage: NSImage { OnboardingFeather.image(side: 110) }
+}
+
+// MARK: - Cached feather
+
+/// Cache of pre-rendered white-tinted feather NSImages keyed by
+/// pixel side length. Each entry is rendered once via lockFocus +
+/// drawn-on-source-in white fill, then reused across body
+/// recomputations and animation frames.
+///
+/// Without this cache, the Welcome and Done steps were calling
+/// `lockFocus`/`unlockFocus` on every SwiftUI body invocation —
+/// which during the spring/bounce/burst animations could mean
+/// dozens of fresh 130×130 image renders per second. That's a
+/// real main-thread cost and a plausible contributor to launch
+/// hitches / freezes.
+private enum OnboardingFeather {
+  /// Mutable cache. NSCache would be overkill — we only ever cache
+  /// 2 entries (sides 110 and 130). Synchronization isn't needed
+  /// because every caller is on the main actor (SwiftUI views).
+  nonisolated(unsafe) private static var cache: [CGFloat: NSImage] = [:]
+
+  static func image(side: CGFloat) -> NSImage {
+    if let cached = cache[side] { return cached }
     guard let source = NSImage(named: "Feather") else { return NSImage() }
     let scaled = NSImage(size: NSSize(width: side, height: side))
     let rect = NSRect(x: 0, y: 0, width: side, height: side)
@@ -489,6 +501,7 @@ private struct DoneStep: View {
     NSColor.white.setFill()
     rect.fill(using: .sourceIn)
     scaled.unlockFocus()
+    cache[side] = scaled
     return scaled
   }
 }

@@ -501,9 +501,18 @@ struct PasteboardClientLive {
         case failedToInsertText
     }
     
+    /// Cap on every AX call below. AX is an inter-process API
+    /// without a default timeout — by default, an unresponsive
+    /// focused app can hang the calling thread for ~6 s. We're on
+    /// the main thread here, so a hang freezes Quill's UI. 0.2 s
+    /// is comfortably above normal AX response times (1–10 ms) but
+    /// well below human-noticeable lag.
+    private static let axMessagingTimeout: Float = 0.2
+
     static func insertTextAtCursor(_ text: String) throws {
         // Get the system-wide accessibility element
         let systemWideElement = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWideElement, axMessagingTimeout)
 
         // Get the focused element
         var focusedElementRef: CFTypeRef?
@@ -514,6 +523,7 @@ struct PasteboardClientLive {
         }
 
         let focusedElement = focusedElementRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(focusedElement, axMessagingTimeout)
 
         // Verify if the focused element supports text insertion
         var probeValue: CFTypeRef?

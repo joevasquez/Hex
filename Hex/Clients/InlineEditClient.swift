@@ -70,6 +70,15 @@ extension DependencyValues {
 
 // MARK: - Live AX implementation
 
+/// AX queries are inter-process calls. Without a messaging timeout
+/// they default to ~6 s, which is catastrophic when called from the
+/// main thread — a single unresponsive focused app will freeze
+/// Quill's UI for the duration. We bound every AX call below this
+/// many seconds so the worst case is an imperceptible stutter, not
+/// a hang. 0.2 s is well above normal AX response times (typically
+/// 1–10 ms) but well below human-noticeable lag.
+private let inlineEditAXTimeout: Float = 0.2
+
 @MainActor
 private func _captureSelectionFromAX() -> String? {
   guard AXIsProcessTrusted() else {
@@ -78,15 +87,25 @@ private func _captureSelectionFromAX() -> String? {
   }
 
   let systemWide = AXUIElementCreateSystemWide()
+  AXUIElementSetMessagingTimeout(systemWide, inlineEditAXTimeout)
+
   var focusedRef: CFTypeRef?
   let focusStatus = AXUIElementCopyAttributeValue(
     systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
   )
   guard focusStatus == .success, let focusedRef else {
-    inlineEditLogger.info("Inline edit: AX could not find a focused element (status=\(focusStatus.rawValue)). Inline edit will be skipped — dictation will paste normally.")
+    if focusStatus == .cannotComplete {
+      // Specifically the "the target app didn't respond in time"
+      // path. Worth flagging at notice level so the cause shows up
+      // in Console without a noisy filter.
+      inlineEditLogger.notice("Inline edit: focused-element AX query timed out — focused app is unresponsive or doesn't expose AX. Skipping inline edit.")
+    } else {
+      inlineEditLogger.info("Inline edit: AX could not find a focused element (status=\(focusStatus.rawValue)). Inline edit will be skipped — dictation will paste normally.")
+    }
     return nil
   }
   let focused = focusedRef as! AXUIElement
+  AXUIElementSetMessagingTimeout(focused, inlineEditAXTimeout)
 
   var selRef: CFTypeRef?
   let selStatus = AXUIElementCopyAttributeValue(
@@ -114,6 +133,8 @@ private func replaceSelectionSync(with text: String) -> Bool {
   }
 
   let systemWide = AXUIElementCreateSystemWide()
+  AXUIElementSetMessagingTimeout(systemWide, inlineEditAXTimeout)
+
   var focusedRef: CFTypeRef?
   guard
     AXUIElementCopyAttributeValue(
@@ -125,6 +146,7 @@ private func replaceSelectionSync(with text: String) -> Bool {
     return false
   }
   let focused = focusedRef as! AXUIElement
+  AXUIElementSetMessagingTimeout(focused, inlineEditAXTimeout)
 
   // Setting kAXSelectedTextAttribute replaces whatever range is
   // currently selected with the new string. Same primitive the

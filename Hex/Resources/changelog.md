@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.0
+
+### New
+
+- **Action mode is live.** The third HUD pill (Dictate → Edit → Action) now turns voice commands into real tasks. Speak "Add to Todoist write email to Mike" or "Remind me to review the launch deck on Friday" and a confirmation panel drops down from the menu bar with editable fields — title, due date, list/project, priority — that you can tweak before clicking Create. The LLM picks the integration from your voice context ("to Todoist", "remind me", etc.) and strips the integration phrase from the title, so the Title field reads "Write email to Mike" rather than the full transcript.
+- **Apple Reminders integration.** Built-in, no setup. Uses EventKit with the new `com.apple.security.personal-information.calendars` entitlement and `NSRemindersUsageDescription`.
+- **Todoist integration.** Settings → Integrations → Connect on the Todoist row prompts for an API token (get one at todoist.com → Settings → Integrations → Developer). Token validates against `GET /api/v1/projects` before saving to the Keychain. Per-integration UI: Reminders shows List + Notes; Todoist adds Project + P1–P4 priority and uses Todoist's natural-language `due_string` so "next Friday at 3pm" works without local date parsing.
+- **Override the LLM's pick.** When 2+ integrations are connected, the confirmation panel header becomes a dropdown — pick the integration before submitting and the field set + list/project picker refresh accordingly.
+- **Mode-cycle hotkey.** A second global shortcut (Settings → Recording → Hot Key → Cycle Mode) cycles the HUD pill between Dictate / Edit / Action without triggering a recording. Useful if your recording hotkey is a single modifier and you want to switch modes from the keyboard.
+
+### UX
+
+- **Edit mode: single Undo chip.** After an inline edit lands, only an Undo button is shown (the green Keep button is gone — the edit auto-commits silently after 8 seconds).
+- **Edit mode: "Highlight text first" chip.** If you trigger Edit mode without a text selection in the focused app, the chip appears, recording is cancelled, and the cancel sound plays. Previously the dictation was pasted as literal text into the wrong place.
+- **Sidebar Settings/History toggle** now uses your system accent color instead of the old purple gradient — harmonizes with the sidebar's default selection styling.
+- **Volume slider in General settings** now slides out smoothly when Sound Effects is toggled off (replaces the disabled-but-still-visible slider).
+
+### Security & store readiness
+
+- **Privacy manifests** (`PrivacyInfo.xcprivacy`) shipped for both macOS and iOS — declares UserDefaults + file-timestamp API usage. Required for App Store submission on iOS 17+.
+- **App Transport Security**: removed the `NSAllowsArbitraryLoads` override; Quill now relies on default macOS HTTPS enforcement.
+- **iOS clients no longer leak transcripts to system logs.** `TextAIClient.swift`, `PhotoAnalysisClient.swift`, and `KeychainStore.swift` now use `os.log` with `, privacy: .private` annotations on anything that could contain transcript text or PII (the previous code logged the first 400 chars of every API response via `print()`).
+- **AppleScript paste-fallback** now escapes backslashes in addition to quotes — prevents malformed scripts when a transcription contains either character.
+
+### Internal
+
+- New TCA reducer `ActionConfirmationFeature` and dependency clients `ActionParsingClient`, `RemindersAdapter`, `TodoistAdapter`.
+- `ActionConfirmationPanel` is a key-capable `NSPanel` anchored below the menu bar (separate from the non-activating HUD).
+- New `cycleModeHotkey: HotKey?` field on `HexSettings` with a fully-wired schema entry; `AppFeature.startCycleModeHotKeyMonitoring()` mirrors the data-race-safe pattern used for the existing paste-last-transcript hotkey.
+
 ## 0.8.7
 
 ### Fixes

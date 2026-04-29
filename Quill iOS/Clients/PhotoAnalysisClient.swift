@@ -13,6 +13,7 @@
 
 import Foundation
 import HexCore
+import os.log
 import UIKit
 
 enum PhotoAnalysisError: LocalizedError {
@@ -57,22 +58,18 @@ enum PhotoAnalysisClient {
 
     let (key, status) = KeychainStore.read(account: account)
     if let key, !key.isEmpty {
-      print("PhotoAnalysisClient: found \(provider.displayName) key (len=\(key.count))")
-      // Anthropic caps vision payloads at 5 MB (and OpenAI has similar
-      // practical limits). Re-encode on the fly if the on-disk JPEG is
-      // over 4 MB, which also rescues photos saved by earlier builds
-      // that didn't downscale correctly.
+      HexLog.aiProcessing.info("PhotoAnalysisClient: found \(provider.displayName, privacy: .public) key")
       let payload = imageData.count > 4_000_000
         ? compressForVision(imageData) ?? imageData
         : imageData
-      print("PhotoAnalysisClient: uploading \(payload.count) bytes (was \(imageData.count))")
+      HexLog.aiProcessing.info("PhotoAnalysisClient: uploading \(payload.count, privacy: .public) bytes (was \(imageData.count, privacy: .public))")
       switch provider {
       case .anthropic: return try await callAnthropic(imageData: payload, apiKey: key)
       case .openAI: return try await callOpenAI(imageData: payload, apiKey: key)
       }
     }
 
-    print("PhotoAnalysisClient: keychain read for account=\(account) returned status=\(status) key=\(key == nil ? "nil" : "empty")")
+    HexLog.aiProcessing.warning("PhotoAnalysisClient: keychain read for account=\(account, privacy: .public) returned status=\(status, privacy: .public)")
     throw PhotoAnalysisError.missingAPIKey(provider)
   }
 

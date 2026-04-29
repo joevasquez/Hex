@@ -13,8 +13,18 @@ struct HotKeySectionView: View {
             let key = store.isSettingHotKey ? nil : hotKey.key
             let modifiers = store.isSettingHotKey ? store.currentModifiers : hotKey.modifiers
 
-            VStack(spacing: 12) {
-                // Hot key view
+            VStack(alignment: .leading, spacing: 8) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Recording")
+                            .font(.subheadline.weight(.semibold))
+                        Text("Hold this hotkey to start dictating, releasing to stop.")
+                            .settingsCaption()
+                    }
+                } icon: {
+                    Image(systemName: "mic.fill")
+                }
+
                 HStack {
                     Spacer()
                     HotKeyView(modifiers: modifiers, key: key, isActive: store.isSettingHotKey)
@@ -39,6 +49,8 @@ struct HotKeySectionView: View {
                     .transition(.opacity)
                 }
             }
+
+            CycleModeHotkeyRow(store: store)
 
             Label {
                 Toggle(
@@ -84,6 +96,63 @@ struct HotKeySectionView: View {
                 } icon: {
                     Image(systemName: "clock")
                 }
+            }
+        }
+        .enableInjection()
+    }
+}
+
+private struct CycleModeHotkeyRow: View {
+    @ObserveInjection var inject
+    @Bindable var store: StoreOf<SettingsFeature>
+
+    var body: some View {
+        let cycleHotkey = store.hexSettings.cycleModeHotkey
+
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Cycle Mode")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Press this shortcut to cycle the HUD between Dictate, Edit, and Action.")
+                        .settingsCaption()
+                }
+            } icon: {
+                Image(systemName: "rectangle.3.group.fill")
+            }
+
+            let key = store.isSettingCycleModeHotkey ? nil : cycleHotkey?.key
+            let modifiers = store.isSettingCycleModeHotkey ? store.currentCycleModeModifiers : (cycleHotkey?.modifiers ?? .init(modifiers: []))
+
+            HStack {
+                Spacer()
+                ZStack {
+                    HotKeyView(modifiers: modifiers, key: key, isActive: store.isSettingCycleModeHotkey)
+
+                    if !store.isSettingCycleModeHotkey, cycleHotkey == nil {
+                        Text("Not set")
+                            .settingsCaption()
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.send(.startSettingCycleModeHotkey)
+                }
+                Spacer()
+            }
+
+            if store.isSettingCycleModeHotkey {
+                Text("Use at least one modifier (⌘, ⌥, ⇧, ⌃) plus a key.")
+                    .settingsCaption()
+            } else if cycleHotkey != nil {
+                Button {
+                    store.send(.clearCycleModeHotkey)
+                } label: {
+                    Label("Clear shortcut", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .enableInjection()

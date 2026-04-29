@@ -13,6 +13,8 @@
 //
 
 import Foundation
+import HexCore
+import os
 import Security
 
 enum KeychainStore {
@@ -44,7 +46,7 @@ enum KeychainStore {
     query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
 
     let status = SecItemAdd(query as CFDictionary, nil)
-    print("KeychainStore.save(account=\(account), bytes=\(data.count)) status=\(status)")
+    HexLog.settings.info("KeychainStore.save(account=\(account, privacy: .public), bytes=\(data.count, privacy: .public)) status=\(status, privacy: .public)")
     return status
   }
 

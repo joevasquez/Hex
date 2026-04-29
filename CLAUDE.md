@@ -42,12 +42,16 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 - `TranscriptionFeature`: Core recording and transcription logic
 - `SettingsFeature`: User preferences and configuration
 - `HistoryFeature`: Transcription history management
+- `ActionConfirmationFeature`: Action mode confirmation panel state (integration picker, editable fields, execute/cancel)
 
 ### Dependency Clients
 - `TranscriptionClient`: WhisperKit integration for ML transcription
 - `RecordingClient`: AVAudioRecorder wrapper for audio capture
 - `PasteboardClient`: Clipboard operations
 - `KeyEventMonitorClient`: Global hotkey monitoring via Sauce framework
+- `ActionParsingClient`: Parses Action-mode voice commands into structured `ActionIntent` JSON via the LLM
+- `RemindersAdapter`: EventKit wrapper that creates Apple Reminders from an `ActionIntent`
+- `TodoistAdapter`: Todoist v1 REST client (`https://api.todoist.com/api/v1/`) — token validation, project fetch, task creation
 
 ### Key Dependencies
 - **WhisperKit**: Core ML transcription (tracking main branch)
@@ -92,9 +96,23 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
    - **Tier 1 — AX sync** (`captureSelectionSync`): reads `kAXSelectedTextAttribute` from the focused element. Fast, no side effects. Works in native AppKit apps and most Cocoa text views.
    - **Tier 2 — Clipboard fallback** (`captureSelectionViaClipboard`): simulates Cmd+C, reads pasteboard, restores original clipboard. Works in Chrome, Electron (Slack, VS Code, Discord), and apps with non-standard text controls. Same approach as Raycast/Rewind.
 
-10. **Integrations surface (frontend-only)**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections. Settings UIs (`IntegrationsSectionView` on macOS, `IntegrationsView` on iOS) show "Coming Soon" on Connect — send adapters per integration land in a follow-up.
+10. **Integrations surface**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections. As of 0.9.0:
+   - **Apple Reminders**: always-available adapter (`RemindersAdapter`, EventKit). Requires `com.apple.security.personal-information.calendars` entitlement + `NSRemindersUsageDescription`.
+   - **Todoist**: real REST adapter (`TodoistAdapter`). User pastes their API token via `TodoistTokenSheet` (Settings → Integrations → Connect on Todoist). Token validates against `GET /api/v1/projects` and is stored under `KeychainKey.todoistAPIToken`.
+   - Other integrations (Notion, Things, Slack, Linear) still show "Coming Soon" — send adapters land in follow-ups.
 
-11. **Auto-titles (iOS)**: New notes are created with empty `title` + `isAutoTitle = true`. `displayTitle` falls back to `Note.derivedTitle` until `NotesStore.generateTitleIfNeeded(noteID:provider:)` swaps in an LLM-generated 3–6 word title via `TextAIClient.generateTitle(for:provider:)`. Flipping `isAutoTitle = false` (either by the AI landing OR the user calling `renameNote`) locks the title so subsequent appends don't re-title. Legacy notes persisted before this field decode as `isAutoTitle = false` so their derived titles are preserved.
+11. **Action mode (macOS)**: Third HUD pill (Dictate → Edit → Action) routes voice commands to integrations. Pipeline: record → transcribe → `ActionParsingClient` produces `ActionIntent { actionType, targetIntegration, title, dueDate, notes, listName, priority }` → `ActionConfirmationPanel` (a key-capable `NSPanel` anchored below the menu bar) drops down with editable fields → user confirms → adapter creates the task. Key behaviors:
+   - **LLM picks the integration from voice context.** "Add to Todoist write email to Mike" → `targetIntegration: .todoist, title: "Write email to Mike"`. The integration phrase is stripped from the title.
+   - **User can override the integration** via a picker in the confirmation panel header (only shown when 2+ integrations are connected).
+   - **Per-integration UI**: Apple Reminders shows Title/Due/List/Notes; Todoist shows Title/Due/Project/Priority/Notes. The list/project picker refreshes when the integration changes.
+   - **Default fallback**: if the LLM picks an unconfigured integration, the panel falls back to Apple Reminders (always available, no setup).
+   - The confirmation panel uses `NotificationCenter` (`actionConfirmationExecuted` / `actionConfirmationCancelled`) to signal completion to `HexAppDelegate`. Observers must hop to `MainActor` via `Task { @MainActor in ... }` since notifications can fire from background queues — the `@MainActor @objc` annotation is a lie under Objective-C bridging.
+
+12. **Mode cycle hotkey (macOS)**: `HexSettings.cycleModeHotkey: HotKey?` is a separate global hotkey that cycles the HUD between Dictate/Edit/Action without triggering a recording. Wired in `AppFeature.startCycleModeHotKeyMonitoring()`, which mirrors the data-race-safe pattern used for `pasteLastTranscriptHotkey`. Settings UI lives alongside the recording hotkey in `HotKeySectionView` with clear "Recording" / "Cycle Mode" labels.
+
+13. **Auto-titles (iOS)**: New notes are created with empty `title` + `isAutoTitle = true`. `displayTitle` falls back to `Note.derivedTitle` until `NotesStore.generateTitleIfNeeded(noteID:provider:)` swaps in an LLM-generated 3–6 word title via `TextAIClient.generateTitle(for:provider:)`. Flipping `isAutoTitle = false` (either by the AI landing OR the user calling `renameNote`) locks the title so subsequent appends don't re-title. Legacy notes persisted before this field decode as `isAutoTitle = false` so their derived titles are preserved.
+
+14. **Privacy manifests**: Both targets ship `PrivacyInfo.xcprivacy` declaring `NSPrivacyAccessedAPICategoryUserDefaults` (reason `C56D.1`) and `NSPrivacyAccessedAPICategoryFileTimestamp` (reason `C617.1`). `NSPrivacyTracking = false`, no tracking domains, no collected data types — required for App Store submission on iOS 17+ and good hygiene on macOS.
 
 ## Models (2025‑11)
 
@@ -132,6 +150,8 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 - `com.apple.security.network.client = true` (HF downloads)
 - `com.apple.security.files.user-selected.read-write = true` (optional import)
 - `com.apple.security.automation.apple-events = true` (media control)
+- `com.apple.security.personal-information.calendars = true` — needed by Action mode's `RemindersAdapter` to call `EKEventStore.requestFullAccessToReminders()` (paired with `NSRemindersUsageDescription` in Info.plist).
+- `com.apple.security.cs.disable-library-validation = true` — required because Sparkle.framework's XPC services (`spks` update installer, `spki` status checker) are signed by a different team identifier, and Inject uses unsigned dylibs for hot-reload in debug builds. Without this, the sandbox rejects the library loads at runtime.
 
 ### Cache root (Parakeet)
 

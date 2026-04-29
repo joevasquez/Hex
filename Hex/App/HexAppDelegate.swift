@@ -7,6 +7,7 @@ private let cacheLogger = HexLog.caches
 
 class HexAppDelegate: NSObject, NSApplicationDelegate {
 	var hudPanel: HUDPanel?
+	var actionPanel: ActionConfirmationPanel?
 	var settingsWindow: NSWindow?
 	var statusItem: NSStatusItem!
 	private var launchedAtLogin = false
@@ -45,6 +46,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 
 		// Start long-running app effects (global hotkeys, permissions, etc.)
 		startLifecycleTasksIfNeeded()
+
+		// Observe action confirmation requests from the transcription pipeline
+		observeActionConfirmation()
 
 		// Then present main views
 		presentMainView()
@@ -139,6 +143,82 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		} else {
 			NSApp.setActivationPolicy(.accessory)
 		}
+	}
+
+	// MARK: - Action Confirmation
+
+	private func observeActionConfirmation() {
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(handleActionConfirmation(_:)),
+			name: .presentActionConfirmation,
+			object: nil
+		)
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(handleActionExecuted),
+			name: .actionConfirmationExecuted,
+			object: nil
+		)
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(handleActionCancelled),
+			name: .actionConfirmationCancelled,
+			object: nil
+		)
+	}
+
+	@objc
+	private func handleActionConfirmation(_ notification: Notification) {
+		guard let intent = notification.userInfo?[ActionConfirmationNotification.intentKey] as? ActionIntent else {
+			return
+		}
+		Task { @MainActor [weak self] in
+			self?.presentActionConfirmation(intent: intent)
+		}
+	}
+
+	@MainActor
+	func presentActionConfirmation(intent: ActionIntent) {
+		HexLog.action.info("Presenting action confirmation panel: \(intent.title, privacy: .private)")
+		dismissActionPanel()
+
+		let confirmationStore = Store(
+			initialState: ActionConfirmationFeature.State(intent: intent)
+		) {
+			ActionConfirmationFeature()
+		}
+
+		let panel = ActionConfirmationPanel.hosting(
+			ActionConfirmationView(store: confirmationStore)
+		)
+		panel.positionBelowStatusBar()
+		panel.orderFrontRegardless()
+		panel.makeKey()
+		actionPanel = panel
+		HexLog.action.info("Action panel ordered front at frame: \(NSStringFromRect(panel.frame), privacy: .public)")
+	}
+
+	@objc
+	private func handleActionExecuted() {
+		Task { @MainActor [weak self] in
+			HexApp.appStore.send(.transcription(.actionExecuted))
+			self?.dismissActionPanel()
+		}
+	}
+
+	@objc
+	private func handleActionCancelled() {
+		Task { @MainActor [weak self] in
+			HexApp.appStore.send(.transcription(.actionCancelled))
+			self?.dismissActionPanel()
+		}
+	}
+
+	@MainActor
+	private func dismissActionPanel() {
+		actionPanel?.orderOut(nil)
+		actionPanel = nil
 	}
 
 	func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows _: Bool) -> Bool {

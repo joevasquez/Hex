@@ -43,6 +43,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var saveTranscriptionHistory: Bool
 	public var maxHistoryEntries: Int?
 	public var pasteLastTranscriptHotkey: HotKey?
+	public var cycleModeHotkey: HotKey?
 	public var hasCompletedModelBootstrap: Bool
 	public var hasCompletedStorageMigration: Bool
 	public var wordRemovalsEnabled: Bool
@@ -105,6 +106,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		saveTranscriptionHistory: Bool = true,
 		maxHistoryEntries: Int? = nil,
 		pasteLastTranscriptHotkey: HotKey? = HexSettings.defaultPasteLastTranscriptHotkey,
+		cycleModeHotkey: HotKey? = nil,
 		hasCompletedModelBootstrap: Bool = false,
 		hasCompletedStorageMigration: Bool = false,
 		wordRemovalsEnabled: Bool = false,
@@ -141,6 +143,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.saveTranscriptionHistory = saveTranscriptionHistory
 		self.maxHistoryEntries = maxHistoryEntries
 		self.pasteLastTranscriptHotkey = pasteLastTranscriptHotkey
+		self.cycleModeHotkey = cycleModeHotkey
 		self.hasCompletedModelBootstrap = hasCompletedModelBootstrap
 		self.hasCompletedStorageMigration = hasCompletedStorageMigration
 		self.wordRemovalsEnabled = wordRemovalsEnabled
@@ -200,6 +203,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case saveTranscriptionHistory
 	case maxHistoryEntries
 	case pasteLastTranscriptHotkey
+	case cycleModeHotkey
 	case hasCompletedModelBootstrap
 	case hasCompletedStorageMigration
 	case wordRemovalsEnabled
@@ -332,6 +336,14 @@ private enum HexSettingsSchema {
 			.pasteLastTranscriptHotkey,
 			keyPath: \.pasteLastTranscriptHotkey,
 			default: defaults.pasteLastTranscriptHotkey,
+			encode: { container, key, value in
+				try container.encodeIfPresent(value, forKey: key)
+			}
+		).eraseToAny(),
+		SettingsField(
+			.cycleModeHotkey,
+			keyPath: \.cycleModeHotkey,
+			default: defaults.cycleModeHotkey,
 			encode: { container, key, value in
 				try container.encodeIfPresent(value, forKey: key)
 			}

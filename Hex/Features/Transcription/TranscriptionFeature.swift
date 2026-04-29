@@ -46,6 +46,8 @@ struct TranscriptionFeature {
     /// After an inline edit replaces text, holds the original so
     /// the user can accept (✓) or undo (✗) from the HUD.
     var pendingEditResult: PendingEditResult?
+    var pendingAction: ActionIntent?
+    var isActionExecuting: Bool = false
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -93,6 +95,13 @@ struct TranscriptionFeature {
     case inlineEditAccept
     case inlineEditUndo
 
+    // Action mode
+    case actionIntentParsed(ActionIntent)
+    case actionParsingFailed(String)
+    case actionExecuted
+    case actionCancelled
+    case presentActionConfirmation(ActionIntent)
+
     // Model availability
     case modelMissing
   }
@@ -124,6 +133,7 @@ struct TranscriptionFeature {
   @Dependency(\.aiProcessing) var aiProcessing
   @Dependency(\.contextClient) var contextClient
   @Dependency(\.inlineEdit) var inlineEdit
+  @Dependency(\.actionParsing) var actionParsing
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -206,24 +216,29 @@ struct TranscriptionFeature {
 
       case let .editClipboardFallbackResult(selection):
         if let selection {
-          // Clipboard fallback succeeded — stash the selection.
-          // Recording is already running; the finalize path will
-          // pick this up when the user releases the key.
           state.inlineEditSelection = selection
           let charCount = selection.count
           transcriptionFeatureLogger.info(
             "Edit mode: clipboard fallback captured \(charCount) chars"
           )
+          return .none
         } else {
-          // Both AX and clipboard failed. Don't cancel recording —
-          // let the user finish speaking. The finalize path will
-          // fall through to normal paste if inlineEditSelection is
-          // still nil, so no dictation is lost.
+          state.editNeedsSelectionMessage = "Highlight text first"
+          state.isTranscribing = false
+          state.isPrewarming = false
           transcriptionFeatureLogger.notice(
-            "Edit mode: both AX and clipboard capture failed — instruction will be pasted as text"
+            "Edit mode: both AX and clipboard capture failed — cancelling transcription, showing selection hint"
+          )
+          return .merge(
+            .cancel(id: CancelID.transcription),
+            .run { [soundEffect] send in
+              soundEffect.play(.cancel)
+              try? await Task.sleep(for: .seconds(3))
+              await send(.editNeedsSelectionDismiss)
+            }
+            .cancellable(id: CancelID.editNeedsSelectionTimer, cancelInFlight: true)
           )
         }
-        return .none
 
       case let .inlineEditApplied(pending):
         state.pendingEditResult = pending
@@ -257,6 +272,36 @@ struct TranscriptionFeature {
             soundEffect.play(.cancel)
           }
         )
+
+      // MARK: - Action Mode
+
+      case let .actionIntentParsed(intent):
+        state.pendingAction = intent
+        return .send(.presentActionConfirmation(intent))
+
+      case let .actionParsingFailed(rawText):
+        transcriptionFeatureLogger.warning("Action parsing failed; falling back to paste")
+        let bundleID = state.sourceAppBundleID
+        return .run { [pasteboard] _ in
+          await pasteboard.paste(rawText, bundleID)
+          soundEffect.play(.pasteTranscript)
+        }
+
+      case .actionExecuted:
+        state.pendingAction = nil
+        return .none
+
+      case .actionCancelled:
+        state.pendingAction = nil
+        return .none
+
+      case let .presentActionConfirmation(intent):
+        transcriptionFeatureLogger.info("Posting action confirmation notification for intent: \(intent.title, privacy: .private)")
+        return .run { _ in
+          await MainActor.run {
+            ActionConfirmationNotification.post(intent: intent)
+          }
+        }
 
       case .modelMissing:
         return .none
@@ -804,6 +849,25 @@ private extension TranscriptionFeature {
       .cancellable(id: CancelID.transcription)
     }
 
+    // Action mode branch: parse the voice command into a structured
+    // action intent via the LLM, then surface the confirmation panel.
+    if state.selectedMode == .action && !modifiedResult.isEmpty {
+      state.isAIProcessing = true
+      return .run { [actionParsing] send in
+        do {
+          let intent = try await actionParsing.parse(modifiedResult, aiProvider)
+          await send(.aiProcessingFinished)
+          await send(.actionIntentParsed(intent))
+        } catch {
+          transcriptionFeatureLogger.error("Action parsing failed: \(error.localizedDescription)")
+          await send(.aiProcessingFinished)
+          await send(.actionParsingFailed(modifiedResult))
+        }
+        try? FileManager.default.removeItem(at: audioURL)
+      }
+      .cancellable(id: CancelID.transcription)
+    }
+
     return .run { [aiProcessing] send in
       do {
         // AI post-processing (if enabled)
@@ -1004,16 +1068,42 @@ struct TranscriptionView: View {
     }
   }
 
+  private var hotkeyHint: String {
+    let hotkey = store.hexSettings.hotkey
+    var parts: [String] = []
+    if hotkey.modifiers.isHyperkey {
+      parts.append("Hyper")
+    } else {
+      for mod in hotkey.modifiers.sorted {
+        parts.append(mod.kind.symbol)
+      }
+    }
+    if let key = hotkey.key {
+      switch key {
+      case .space: parts.append("Space")
+      case .escape: parts.append("Esc")
+      default: parts.append(key.toString)
+      }
+    }
+    let keys = parts.joined(separator: " ")
+    let verb: String = switch store.selectedMode {
+    case .dictate: "to dictate"
+    case .edit: "to edit"
+    case .action: "for action"
+    }
+    return "Hold \(keys) \(verb)"
+  }
+
   var body: some View {
     TranscriptionIndicatorView(
       status: status,
       mode: store.selectedMode,
       meter: store.meter,
       recordingStartTime: store.recordingStartTime,
+      hotkeyHint: hotkeyHint,
       editMessage: store.editNeedsSelectionMessage,
       pendingEditResult: store.pendingEditResult,
       onCycleMode: { store.send(.cycleMode) },
-      onEditAccept: { store.send(.inlineEditAccept) },
       onEditUndo: { store.send(.inlineEditUndo) }
     )
     .frame(maxWidth: .infinity, maxHeight: .infinity)

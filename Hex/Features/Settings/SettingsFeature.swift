@@ -15,6 +15,7 @@ private typealias SettingsAudioPropertyListenerBlock = @convention(block) (UInt3
 private enum HotKeyCaptureTarget {
   case recording
   case pasteLastTranscript
+  case cycleMode
 }
 
 extension SharedReaderKey
@@ -23,9 +24,13 @@ extension SharedReaderKey
   static var isSettingHotKey: Self {
     Self[.inMemory("isSettingHotKey"), default: false]
   }
-  
+
   static var isSettingPasteLastTranscriptHotkey: Self {
     Self[.inMemory("isSettingPasteLastTranscriptHotkey"), default: false]
+  }
+
+  static var isSettingCycleModeHotkey: Self {
+    Self[.inMemory("isSettingCycleModeHotkey"), default: false]
   }
 
   static var isRemappingScratchpadFocused: Self {
@@ -42,6 +47,7 @@ struct SettingsFeature {
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isSettingHotKey) var isSettingHotKey: Bool = false
     @Shared(.isSettingPasteLastTranscriptHotkey) var isSettingPasteLastTranscriptHotkey: Bool = false
+    @Shared(.isSettingCycleModeHotkey) var isSettingCycleModeHotkey: Bool = false
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
     @Shared(.hotkeyPermissionState) var hotkeyPermissionState: HotkeyPermissionState
@@ -49,6 +55,7 @@ struct SettingsFeature {
     var languages: IdentifiedArrayOf<Language> = []
     var currentModifiers: Modifiers = .init(modifiers: [])
     var currentPasteLastModifiers: Modifiers = .init(modifiers: [])
+    var currentCycleModeModifiers: Modifiers = .init(modifiers: [])
     var remappingScratchpadText: String = ""
     
     // Available microphones
@@ -72,6 +79,8 @@ struct SettingsFeature {
     case startSettingHotKey
     case startSettingPasteLastTranscriptHotkey
     case clearPasteLastTranscriptHotkey
+    case startSettingCycleModeHotkey
+    case clearCycleModeHotkey
     case keyEvent(KeyEvent)
     case toggleOpenOnLogin(Bool)
     case toggleShowDockIcon(Bool)
@@ -170,6 +179,9 @@ struct SettingsFeature {
     case .pasteLastTranscript:
       state.$isSettingPasteLastTranscriptHotkey.withLock { $0 = true }
       state.currentPasteLastModifiers = .init(modifiers: [])
+    case .cycleMode:
+      state.$isSettingCycleModeHotkey.withLock { $0 = true }
+      state.currentCycleModeModifiers = .init(modifiers: [])
     }
   }
 
@@ -181,6 +193,9 @@ struct SettingsFeature {
     case .pasteLastTranscript:
       state.$isSettingPasteLastTranscriptHotkey.withLock { $0 = false }
       state.currentPasteLastModifiers = .init(modifiers: [])
+    case .cycleMode:
+      state.$isSettingCycleModeHotkey.withLock { $0 = false }
+      state.currentCycleModeModifiers = .init(modifiers: [])
     }
   }
 
@@ -190,6 +205,8 @@ struct SettingsFeature {
       state.currentModifiers
     case .pasteLastTranscript:
       state.currentPasteLastModifiers
+    case .cycleMode:
+      state.currentCycleModeModifiers
     }
   }
 
@@ -199,6 +216,8 @@ struct SettingsFeature {
       state.currentModifiers = modifiers
     case .pasteLastTranscript:
       state.currentPasteLastModifiers = modifiers
+    case .cycleMode:
+      state.currentCycleModeModifiers = modifiers
     }
   }
 
@@ -214,6 +233,11 @@ struct SettingsFeature {
       state.$hexSettings.withLock {
         $0.pasteLastTranscriptHotkey = HotKey(key: key, modifiers: modifiers.erasingSides())
       }
+    case .cycleMode:
+      guard let key else { return }
+      state.$hexSettings.withLock {
+        $0.cycleModeHotkey = HotKey(key: key, modifiers: modifiers.erasingSides())
+      }
     }
   }
 
@@ -226,7 +250,7 @@ struct SettingsFeature {
     let updatedModifiers = keyEvent.modifiers.union(captureModifiers(for: target, state: state))
     updateCaptureModifiers(updatedModifiers, for: target, state: &state)
 
-    if target == .pasteLastTranscript, keyEvent.key != nil, updatedModifiers.isEmpty {
+    if (target == .pasteLastTranscript || target == .cycleMode), keyEvent.key != nil, updatedModifiers.isEmpty {
       return .none
     }
 
@@ -449,14 +473,26 @@ struct SettingsFeature {
       case .startSettingPasteLastTranscriptHotkey:
         beginCapture(.pasteLastTranscript, state: &state)
         return .none
-        
+
       case .clearPasteLastTranscriptHotkey:
         state.$hexSettings.withLock { $0.pasteLastTranscriptHotkey = nil }
+        return .none
+
+      case .startSettingCycleModeHotkey:
+        beginCapture(.cycleMode, state: &state)
+        return .none
+
+      case .clearCycleModeHotkey:
+        state.$hexSettings.withLock { $0.cycleModeHotkey = nil }
         return .none
 
       case let .keyEvent(keyEvent):
         if state.isSettingPasteLastTranscriptHotkey {
           return handleCapture(keyEvent, for: .pasteLastTranscript, state: &state)
+        }
+
+        if state.isSettingCycleModeHotkey {
+          return handleCapture(keyEvent, for: .cycleMode, state: &state)
         }
 
         guard state.isSettingHotKey else { return .none }

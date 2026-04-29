@@ -23,10 +23,8 @@ class HUDPanel: NSPanel {
       .utilityWindow,
     ]
 
-    // Start with a generous frame — the SwiftUI pill is smaller
-    // and the transparent surround passes clicks through.
     super.init(
-      contentRect: .init(x: 0, y: 0, width: 260, height: 100),
+      contentRect: .init(x: 0, y: 0, width: 420, height: 100),
       styleMask: styleMask,
       backing: .buffered,
       defer: false

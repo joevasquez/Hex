@@ -46,6 +46,7 @@ extension DependencyValues {
 enum KeychainKey {
   static let openAIAPIKey = "com.joevasquez.Quill.openAIAPIKey"
   static let anthropicAPIKey = "com.joevasquez.Quill.anthropicAPIKey"
+  static let todoistAPIToken = "com.joevasquez.Quill.todoistAPIToken"
 }
 
 // MARK: - Live Implementation

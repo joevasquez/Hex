@@ -98,6 +98,7 @@ struct AppFeature {
       case .task:
         return .merge(
           startPasteLastTranscriptMonitoring(),
+          startCycleModeHotKeyMonitoring(),
           ensureSelectedModelReadiness(),
           startPermissionMonitoring()
         )
@@ -240,6 +241,44 @@ struct AppFeature {
     }
   }
 
+  private func startCycleModeHotKeyMonitoring() -> Effect<Action> {
+    .run { send in
+      // Mirror startPasteLastTranscriptMonitoring's data-race-safe pattern.
+      @Shared(.isSettingCycleModeHotkey) var isSettingCycleModeHotkey: Bool
+      @Shared(.hexSettings) var hexSettings: HexSettings
+      let sharedIsSettingCycle = $isSettingCycleModeHotkey
+      let sharedHexSettings = $hexSettings
+
+      let token = keyEventMonitor.handleKeyEvent { keyEvent in
+        if sharedIsSettingCycle.wrappedValue {
+          return false
+        }
+
+        guard let cycleHotkey = sharedHexSettings.wrappedValue.cycleModeHotkey,
+              let key = keyEvent.key,
+              key == cycleHotkey.key,
+              keyEvent.modifiers.matchesExactly(cycleHotkey.modifiers) else {
+          return false
+        }
+
+        MainActor.assumeIsolated {
+          send(.transcription(.cycleMode))
+        }
+        return true
+      }
+
+      defer { token.cancel() }
+
+      await withTaskCancellationHandler {
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .seconds(60))
+        }
+      } onCancel: {
+        token.cancel()
+      }
+    }
+  }
+
   private func ensureSelectedModelReadiness() -> Effect<Action> {
     .run { send in
       @Shared(.hexSettings) var hexSettings: HexSettings
@@ -344,17 +383,8 @@ private struct SidebarModeToggle: View {
             .background {
               if isSelected {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                  .fill(
-                    LinearGradient(
-                      colors: [
-                        Color.purple.opacity(0.85),
-                        Color(red: 0.42, green: 0.22, blue: 0.62),
-                      ],
-                      startPoint: .top,
-                      endPoint: .bottom
-                    )
-                  )
-                  .shadow(color: Color.purple.opacity(0.25), radius: 3, y: 1)
+                  .fill(Color.accentColor)
+                  .shadow(color: Color.accentColor.opacity(0.25), radius: 3, y: 1)
                   .matchedGeometryEffect(id: "thumb", in: thumbNamespace)
               }
             }

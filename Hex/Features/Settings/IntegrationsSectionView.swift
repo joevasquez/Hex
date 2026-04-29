@@ -27,6 +27,7 @@ struct IntegrationsSectionView: View {
   private var connectedData: Data = Data()
 
   @State private var showingComingSoon = false
+  @State private var showingTodoistSheet = false
   @State private var pendingIntegration: Integration?
 
   var body: some View {
@@ -62,6 +63,13 @@ struct IntegrationsSectionView: View {
     } message: { integration in
       Text("\(integration.name) integration ships in a follow-up. We're saving your interest — you'll be prompted to finish the connection when it lands.")
     }
+    .sheet(isPresented: $showingTodoistSheet) {
+      TodoistTokenSheet(onConnected: {
+        var current = connected
+        current.insert(.todoist)
+        connectedData = IntegrationConnectionStore.encode(current)
+      })
+    }
     .enableInjection()
   }
 
@@ -89,14 +97,30 @@ struct IntegrationsSectionView: View {
   private func toggle(_ integration: Integration) {
     var current = connected
     if current.contains(integration.identifier) {
+      // Disconnect: drop from set. For Todoist, also clear the token so the
+      // adapter doesn't act on a "disconnected" integration.
       current.remove(integration.identifier)
-    } else {
-      // MVP: just record intent + show "coming soon". No OAuth yet.
-      current.insert(integration.identifier)
+      connectedData = IntegrationConnectionStore.encode(current)
+      if integration.identifier == .todoist {
+        Task {
+          @Dependency(\.keychain) var keychain
+          await keychain.delete(KeychainKey.todoistAPIToken)
+        }
+      }
+      return
+    }
+
+    switch integration.identifier {
+    case .todoist:
+      // Real connection flow: prompt for API token.
+      showingTodoistSheet = true
+    default:
+      // Other integrations are catalog-only for now.
       pendingIntegration = integration
       showingComingSoon = true
+      current.insert(integration.identifier)
+      connectedData = IntegrationConnectionStore.encode(current)
     }
-    connectedData = IntegrationConnectionStore.encode(current)
   }
 }
 

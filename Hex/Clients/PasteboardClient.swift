@@ -485,7 +485,9 @@ struct PasteboardClientLive {
     }
     
     func simulateTypingWithAppleScript(_ text: String) {
-        let escapedText = text.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedText = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         let script = NSAppleScript(source: "tell application \"System Events\" to keystroke \"\(escapedText)\"")
         var error: NSDictionary?
         script?.executeAndReturnError(&error)

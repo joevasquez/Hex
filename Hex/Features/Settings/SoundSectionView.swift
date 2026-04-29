@@ -8,39 +8,51 @@ struct SoundSectionView: View {
 	@Bindable var store: StoreOf<SettingsFeature>
 
 	var body: some View {
-		let sliderBinding = Binding<Double>(
-			get: { volumePercentage(for: store.hexSettings.soundEffectsVolume) },
-			set: { store.send(.setSoundEffectsVolume(actualVolume(fromPercentage: $0))) }
-		)
-
-		return Section {
+		Section {
 			Label {
 				Toggle(
 					"Sound Effects",
 					isOn: Binding(
 						get: { store.hexSettings.soundEffectsEnabled },
-						set: { store.send(.setSoundEffectsEnabled($0)) }
+						set: { isOn in
+							withAnimation(.snappy(duration: 0.25)) {
+								_ = store.send(.setSoundEffectsEnabled(isOn))
+							}
+						}
 					)
 				)
 			} icon: {
 				Image(systemName: "speaker.wave.2.fill")
 			}
 
-			VStack(alignment: .leading, spacing: 8) {
-				HStack {
-					Text("Volume")
-					Spacer()
-					Text(formattedVolume(for: store.hexSettings.soundEffectsVolume))
-						.foregroundStyle(.secondary)
-						.monospacedDigit()
-				}
-				Slider(value: sliderBinding, in: 0...1)
-					.disabled(!store.hexSettings.soundEffectsEnabled)
+			if store.hexSettings.soundEffectsEnabled {
+				volumeControl
+					.transition(.asymmetric(
+						insertion: .opacity.combined(with: .move(edge: .top)),
+						removal: .opacity.combined(with: .move(edge: .top))
+					))
 			}
 		} header: {
 			Text("Sound")
 		}
 		.enableInjection()
+	}
+
+	private var volumeControl: some View {
+		let sliderBinding = Binding<Double>(
+			get: { volumePercentage(for: store.hexSettings.soundEffectsVolume) },
+			set: { store.send(.setSoundEffectsVolume(actualVolume(fromPercentage: $0))) }
+		)
+		return VStack(alignment: .leading, spacing: 8) {
+			HStack {
+				Text("Volume")
+				Spacer()
+				Text(formattedVolume(for: store.hexSettings.soundEffectsVolume))
+					.foregroundStyle(.secondary)
+					.monospacedDigit()
+			}
+			Slider(value: sliderBinding, in: 0...1)
+		}
 	}
 }
 

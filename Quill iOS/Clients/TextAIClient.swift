@@ -14,6 +14,7 @@
 
 import Foundation
 import HexCore
+import os.log
 
 enum TextAIError: LocalizedError {
   case missingAPIKey(AIProvider)
@@ -61,11 +62,11 @@ enum TextAIClient {
     }
     let (key, status) = KeychainStore.read(account: account)
     guard let key, !key.isEmpty else {
-      print("TextAIClient: no \(provider.displayName) key (status=\(status))")
+      HexLog.aiProcessing.warning("TextAIClient: no \(provider.displayName, privacy: .public) key (status=\(status, privacy: .public))")
       throw TextAIError.missingAPIKey(provider)
     }
     let modeLabel = customSystemPrompt != nil ? "custom" : mode.rawValue
-    print("TextAIClient: processing \(text.count) chars via \(provider.displayName) mode=\(modeLabel)")
+    HexLog.aiProcessing.info("TextAIClient: processing \(text.count, privacy: .public) chars via \(provider.displayName, privacy: .public) mode=\(modeLabel, privacy: .public)")
 
     let result: String
     switch provider {
@@ -74,9 +75,7 @@ enum TextAIClient {
     case .openAI:
       result = try await callOpenAI(text: text, systemPrompt: systemPrompt, apiKey: key)
     }
-    print(
-      "TextAIClient: response \(result.count) chars — first 400:\n\(String(result.prefix(400)))\n---"
-    )
+    HexLog.aiProcessing.info("TextAIClient: response \(result.count, privacy: .public) chars")
 
     // Safety net: if the model ignored the system prompt and treated
     // the transcript as a conversation (answering a question, refusing
@@ -84,7 +83,7 @@ enum TextAIClient {
     // transcript so the user's dictation is never replaced by an
     // assistant-style reply.
     if TranscriptRefusalDetector.isRefusal(result) {
-      print("TextAIClient: response looks like a refusal; falling back to raw transcript")
+      HexLog.aiProcessing.warning("TextAIClient: response looks like a refusal; falling back to raw transcript")
       return text
     }
 
@@ -142,7 +141,7 @@ enum TextAIClient {
     }
 
     let cleaned = sanitizeTitle(raw)
-    print("TextAIClient: generated title \"\(cleaned)\" (\(cleaned.count) chars)")
+    HexLog.aiProcessing.info("TextAIClient: generated title (\(cleaned.count, privacy: .public) chars)")
     return cleaned
   }
 

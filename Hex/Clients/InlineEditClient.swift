@@ -35,6 +35,17 @@ struct InlineEditClient {
   /// this is fine to call directly from the reducer.
   var captureSelectionSync: @Sendable () -> String? = { nil }
 
+  /// Clipboard-based selection capture fallback. Simulates Cmd+C,
+  /// reads the copied text from the pasteboard, then restores the
+  /// original clipboard contents. Used when AX-based selection
+  /// reading returns nil — common in Chrome, Electron apps (Slack,
+  /// VS Code, Discord), and apps with non-standard text controls.
+  ///
+  /// This is the same approach used by Raycast, Rewind, and most
+  /// "AI text actions" apps. AX selection reading is too inconsistent
+  /// across the macOS app ecosystem to rely on as the sole path.
+  var captureSelectionViaClipboard: @Sendable () async -> String? = { nil }
+
   /// Replace the selected text in the focused element with `text`,
   /// returning true on success. Uses the same AX mechanism the
   /// PasteboardClient uses for its primary paste path, so it works
@@ -54,6 +65,9 @@ extension InlineEditClient: DependencyKey {
         // to the AX-talking helper.
         MainActor.assumeIsolated { _captureSelectionFromAX() }
       },
+      captureSelectionViaClipboard: {
+        await clipboardFallbackCapture()
+      },
       replaceSelection: { text in
         await MainActor.run { replaceSelectionSync(with: text) }
       }
@@ -70,59 +84,199 @@ extension DependencyValues {
 
 // MARK: - Live AX implementation
 
-/// AX queries are inter-process calls. Without a messaging timeout
-/// they default to ~6 s, which is catastrophic when called from the
-/// main thread — a single unresponsive focused app will freeze
-/// Quill's UI for the duration. We bound every AX call below this
-/// many seconds so the worst case is an imperceptible stutter, not
-/// a hang. 0.2 s is well above normal AX response times (typically
-/// 1–10 ms) but well below human-noticeable lag.
-private let inlineEditAXTimeout: Float = 0.2
+/// AX queries are inter-process calls. Timeouts prevent hangs when
+/// the target app is unresponsive. 0.5 s covers slow renderers like
+/// Chrome while staying below human-noticeable lag.
+private let inlineEditAXTimeout: Float = 0.5
+
+/// Whether AX permission has been granted. Cached so we only log
+/// the missing-permission warning once per launch.
+@MainActor
+private var _axPermissionWarned = false
 
 @MainActor
 private func _captureSelectionFromAX() -> String? {
   guard AXIsProcessTrusted() else {
-    inlineEditLogger.notice("Inline edit: AX permission missing; cannot read selection. Grant Accessibility in System Settings → Privacy & Security.")
-    return nil
-  }
-
-  let systemWide = AXUIElementCreateSystemWide()
-  AXUIElementSetMessagingTimeout(systemWide, inlineEditAXTimeout)
-
-  var focusedRef: CFTypeRef?
-  let focusStatus = AXUIElementCopyAttributeValue(
-    systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
-  )
-  guard focusStatus == .success, let focusedRef else {
-    if focusStatus == .cannotComplete {
-      // Specifically the "the target app didn't respond in time"
-      // path. Worth flagging at notice level so the cause shows up
-      // in Console without a noisy filter.
-      inlineEditLogger.notice("Inline edit: focused-element AX query timed out — focused app is unresponsive or doesn't expose AX. Skipping inline edit.")
-    } else {
-      inlineEditLogger.info("Inline edit: AX could not find a focused element (status=\(focusStatus.rawValue)). Inline edit will be skipped — dictation will paste normally.")
+    if !_axPermissionWarned {
+      _axPermissionWarned = true
+      inlineEditLogger.error(
+        "Inline edit: Accessibility permission NOT granted. Edit mode cannot read text selections. Grant permission in System Settings → Privacy & Security → Accessibility."
+      )
     }
     return nil
   }
+
+  // ── Strategy: query the frontmost app's AX element directly ──
+  // Using the app-specific element (vs AXUIElementCreateSystemWide)
+  // is more reliable for apps like Chrome that have a deep AX tree.
+  guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+    inlineEditLogger.info("Inline edit: no frontmost application — skipping")
+    return nil
+  }
+
+  // Don't try to read a selection from ourselves.
+  let quillBundles: Set<String> = ["com.joevasquez.Quill", "com.joevasquez.Quill.debug"]
+  if let bid = frontApp.bundleIdentifier, quillBundles.contains(bid) {
+    inlineEditLogger.info("Inline edit: Quill is frontmost — no useful selection to capture")
+    return nil
+  }
+
+  let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+  AXUIElementSetMessagingTimeout(appElement, inlineEditAXTimeout)
+
+  // Get the focused UI element within the frontmost app.
+  var focusedRef: CFTypeRef?
+  let focusStatus = AXUIElementCopyAttributeValue(
+    appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef
+  )
+
+  // Fallback: if app-specific query fails, try system-wide.
+  if focusStatus != .success || focusedRef == nil {
+    let systemWide = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(systemWide, inlineEditAXTimeout)
+    let swStatus = AXUIElementCopyAttributeValue(
+      systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
+    )
+    if swStatus != .success || focusedRef == nil {
+      let appName = frontApp.localizedName ?? "unknown"
+      inlineEditLogger.notice(
+        "Inline edit: could not find focused element in \(appName, privacy: .public) (app status=\(focusStatus.rawValue), system status=\(swStatus.rawValue))"
+      )
+      return nil
+    }
+  }
+
   let focused = focusedRef as! AXUIElement
   AXUIElementSetMessagingTimeout(focused, inlineEditAXTimeout)
 
+  // Read the selected text attribute.
   var selRef: CFTypeRef?
   let selStatus = AXUIElementCopyAttributeValue(
     focused, kAXSelectedTextAttribute as CFString, &selRef
   )
   guard selStatus == .success, let selection = selRef as? String else {
-    inlineEditLogger.info("Inline edit: focused element doesn't expose kAXSelectedTextAttribute (status=\(selStatus.rawValue)). The hosting app may not support AX text selection — inline edit will be skipped.")
+    let appName = frontApp.localizedName ?? "unknown"
+    inlineEditLogger.notice(
+      "Inline edit: \(appName, privacy: .public) doesn't expose kAXSelectedTextAttribute (status=\(selStatus.rawValue)). Text selection may not be supported."
+    )
     return nil
   }
 
   let trimmed = selection.trimmingCharacters(in: .whitespacesAndNewlines)
   if trimmed.isEmpty {
-    inlineEditLogger.info("Inline edit: focused element has empty / whitespace-only selection. Skipping inline edit — dictation will paste normally.")
+    inlineEditLogger.info("Inline edit: selection is empty / whitespace-only — skipping")
     return nil
   }
-  inlineEditLogger.info("Inline edit: captured selection (\(selection.count) chars)")
+  let appName = frontApp.localizedName ?? "unknown"
+  inlineEditLogger.info(
+    "Inline edit: captured \(selection.count) chars from \(appName, privacy: .public)"
+  )
   return selection
+}
+
+// MARK: - Clipboard fallback implementation
+
+/// Captures the selected text by simulating Cmd+C, reading the
+/// pasteboard, and restoring the original clipboard contents.
+///
+/// This is the robust fallback that works in Chrome, Electron apps,
+/// and any app that supports standard copy — which is virtually all
+/// of them. AX-based selection reading (`kAXSelectedTextAttribute`)
+/// is faster and has no clipboard side effects, but it's unreliable
+/// in Chrome (lazy AX tree), Electron (minimal AX support), and
+/// apps with custom text engines.
+///
+/// Sequence: snapshot clipboard → Cmd+C → wait 150 ms → read → restore.
+/// Named to avoid collision with the `@DependencyClient`-generated
+/// `_captureSelectionViaClipboard` backing store.
+@MainActor
+private func clipboardFallbackCapture() async -> String? {
+  guard AXIsProcessTrusted() else {
+    // CGEvent.post silently fails without Accessibility permission —
+    // same gate as the AX path.
+    if !_axPermissionWarned {
+      _axPermissionWarned = true
+      inlineEditLogger.error(
+        "Clipboard fallback: Accessibility permission required for Cmd+C simulation. Grant in System Settings → Privacy & Security → Accessibility."
+      )
+    }
+    return nil
+  }
+
+  // Don't try to copy from ourselves.
+  let quillBundles: Set<String> = ["com.joevasquez.Quill", "com.joevasquez.Quill.debug"]
+  if let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+     quillBundles.contains(bid)
+  {
+    inlineEditLogger.info("Clipboard fallback: Quill is frontmost — skipping")
+    return nil
+  }
+
+  let pasteboard = NSPasteboard.general
+  let savedChangeCount = pasteboard.changeCount
+
+  // ── 1. Snapshot the current clipboard contents ──
+  let savedItems: [[(NSPasteboard.PasteboardType, Data)]] =
+    (pasteboard.pasteboardItems ?? []).map { item in
+      item.types.compactMap { type in
+        guard let data = item.data(forType: type) else { return nil }
+        return (type, data)
+      }
+    }
+
+  // ── 2. Simulate Cmd+C via CGEvent ──
+  let source = CGEventSource(stateID: .combinedSessionState)
+  let cKeyCode: CGKeyCode = 8     // 'C' virtual key code
+  let cmdKeyCode: CGKeyCode = 55  // Left Command
+
+  let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: cmdKeyCode, keyDown: true)
+  let cDown = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: true)
+  cDown?.flags = .maskCommand
+  let cUp = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: false)
+  cUp?.flags = .maskCommand
+  let cmdUp = CGEvent(keyboardEventSource: source, virtualKey: cmdKeyCode, keyDown: false)
+
+  cmdDown?.post(tap: .cghidEventTap)
+  cDown?.post(tap: .cghidEventTap)
+  cUp?.post(tap: .cghidEventTap)
+  cmdUp?.post(tap: .cghidEventTap)
+
+  // ── 3. Wait for the target app to process the copy ──
+  // 150 ms covers Chrome and Electron which can be sluggish.
+  try? await Task.sleep(for: .milliseconds(150))
+
+  // ── 4. Check if the pasteboard changed ──
+  if pasteboard.changeCount == savedChangeCount {
+    inlineEditLogger.info(
+      "Clipboard fallback: pasteboard unchanged after Cmd+C — nothing selected or app didn't respond"
+    )
+    return nil
+  }
+
+  let copiedText = pasteboard.string(forType: .string)
+
+  // ── 5. Restore original clipboard contents ──
+  pasteboard.clearContents()
+  for itemData in savedItems {
+    let item = NSPasteboardItem()
+    for (type, data) in itemData {
+      item.setData(data, forType: type)
+    }
+    pasteboard.writeObjects([item])
+  }
+
+  guard let text = copiedText,
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  else {
+    inlineEditLogger.info("Clipboard fallback: Cmd+C produced empty text")
+    return nil
+  }
+
+  let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
+  inlineEditLogger.info(
+    "Clipboard fallback: captured \(text.count) chars from \(appName, privacy: .public)"
+  )
+  return text
 }
 
 @MainActor
@@ -132,25 +286,30 @@ private func replaceSelectionSync(with text: String) -> Bool {
     return false
   }
 
-  let systemWide = AXUIElementCreateSystemWide()
-  AXUIElementSetMessagingTimeout(systemWide, inlineEditAXTimeout)
-
+  // Try app-specific first, then system-wide fallback.
   var focusedRef: CFTypeRef?
-  guard
+  if let frontApp = NSWorkspace.shared.frontmostApplication {
+    let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+    AXUIElementSetMessagingTimeout(appElement, inlineEditAXTimeout)
+    AXUIElementCopyAttributeValue(
+      appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef
+    )
+  }
+  if focusedRef == nil {
+    let systemWide = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(systemWide, inlineEditAXTimeout)
     AXUIElementCopyAttributeValue(
       systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
-    ) == .success,
-    let focusedRef
-  else {
+    )
+  }
+  guard let focusedRef else {
     inlineEditLogger.warning("Inline edit: focused element not found for replace")
     return false
   }
+
   let focused = focusedRef as! AXUIElement
   AXUIElementSetMessagingTimeout(focused, inlineEditAXTimeout)
 
-  // Setting kAXSelectedTextAttribute replaces whatever range is
-  // currently selected with the new string. Same primitive the
-  // PasteboardClient AX path uses for inserts.
   let status = AXUIElementSetAttributeValue(
     focused, kAXSelectedTextAttribute as CFString, text as CFTypeRef
   )

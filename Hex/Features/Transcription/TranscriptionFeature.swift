@@ -5,6 +5,7 @@
 //  Created by Kit Langton on 1/24/25.
 //
 
+import ApplicationServices
 import ComposableArchitecture
 import CoreGraphics
 import Foundation
@@ -36,6 +37,15 @@ struct TranscriptionFeature {
     /// this text rather than as new content to paste. The transcript
     /// pipeline branches on this at finalize time.
     var inlineEditSelection: String?
+    /// User-selected mode for the HUD pill. Cycles through
+    /// Dictate → Edit → Action on tap.
+    var selectedMode: TranscriptionIndicatorView.Mode = .dictate
+    /// Transient message shown when the user tries to record in
+    /// Edit mode without highlighting text. Auto-dismissed after 3s.
+    var editNeedsSelectionMessage: String?
+    /// After an inline edit replaces text, holds the original so
+    /// the user can accept (✓) or undo (✗) from the HUD.
+    var pendingEditResult: PendingEditResult?
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -70,8 +80,28 @@ struct TranscriptionFeature {
     /// instruction and replace this selection rather than paste.
     case inlineEditSelectionCaptured(String)
 
+    // Mode cycling
+    case cycleMode
+
+    // Edit mode
+    case editNeedsSelectionDismiss
+    /// Result of the clipboard fallback capture (Cmd+C → read).
+    /// Sent when AX-based selection reading failed and we tried the
+    /// clipboard path instead.
+    case editClipboardFallbackResult(String?)
+    case inlineEditApplied(PendingEditResult)
+    case inlineEditAccept
+    case inlineEditUndo
+
     // Model availability
     case modelMissing
+  }
+
+  /// Holds enough context to undo an inline edit.
+  struct PendingEditResult: Equatable {
+    let original: String
+    let edited: String
+    let sourceAppBundleID: String?
   }
 
   enum CancelID {
@@ -79,6 +109,8 @@ struct TranscriptionFeature {
     case recordingCleanup
     case transcription
     case liveTranscription
+    case editNeedsSelectionTimer
+    case editAcceptanceTimer
   }
 
   @Dependency(\.transcription) var transcription
@@ -159,6 +191,72 @@ struct TranscriptionFeature {
         state.inlineEditSelection = selection
         transcriptionFeatureLogger.info("Inline edit: captured selection (\(selection.count) chars)")
         return .none
+
+      case .cycleMode:
+        state.selectedMode = state.selectedMode.next
+        let modeName = state.selectedMode.rawValue
+        transcriptionFeatureLogger.info("Mode cycled to \(modeName)")
+        return .none
+
+      // MARK: - Edit Mode
+
+      case .editNeedsSelectionDismiss:
+        state.editNeedsSelectionMessage = nil
+        return .none
+
+      case let .editClipboardFallbackResult(selection):
+        if let selection {
+          // Clipboard fallback succeeded — stash the selection.
+          // Recording is already running; the finalize path will
+          // pick this up when the user releases the key.
+          state.inlineEditSelection = selection
+          let charCount = selection.count
+          transcriptionFeatureLogger.info(
+            "Edit mode: clipboard fallback captured \(charCount) chars"
+          )
+        } else {
+          // Both AX and clipboard failed. Don't cancel recording —
+          // let the user finish speaking. The finalize path will
+          // fall through to normal paste if inlineEditSelection is
+          // still nil, so no dictation is lost.
+          transcriptionFeatureLogger.notice(
+            "Edit mode: both AX and clipboard capture failed — instruction will be pasted as text"
+          )
+        }
+        return .none
+
+      case let .inlineEditApplied(pending):
+        state.pendingEditResult = pending
+        // Auto-accept after 8 seconds if the user doesn't act.
+        return .run { send in
+          try? await Task.sleep(for: .seconds(8))
+          await send(.inlineEditAccept)
+        }
+        .cancellable(id: CancelID.editAcceptanceTimer, cancelInFlight: true)
+
+      case .inlineEditAccept:
+        state.pendingEditResult = nil
+        return .cancel(id: CancelID.editAcceptanceTimer)
+
+      case .inlineEditUndo:
+        guard let pending = state.pendingEditResult else { return .none }
+        state.pendingEditResult = nil
+        let original = pending.original
+        let bundleID = pending.sourceAppBundleID
+        return .merge(
+          .cancel(id: CancelID.editAcceptanceTimer),
+          .run { [inlineEdit, pasteboard] _ in
+            // Re-select and replace with the original text via AX.
+            // If AX fails, paste the original so the user can
+            // manually undo.
+            let restored = await inlineEdit.replaceSelection(original)
+            if !restored {
+              transcriptionFeatureLogger.warning("Inline edit undo: AX restore failed; pasting original")
+              await pasteboard.paste(original, bundleID)
+            }
+            soundEffect.play(.cancel)
+          }
+        )
 
       case .modelMissing:
         return .none
@@ -358,49 +456,35 @@ private extension TranscriptionFeature {
         .run { _ in soundEffect.play(.cancel) }
       )
     }
-    state.isRecording = true
-    let startTime = now
-    state.recordingStartTime = startTime
-    
+    state.pendingEditResult = nil
+    state.editNeedsSelectionMessage = nil
+    state.capturedContext = nil
+    state.partialTranscript = ""
+    state.inlineEditSelection = nil
+
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
       state.sourceAppBundleID = activeApp.bundleIdentifier
       state.sourceAppName = activeApp.localizedName
     }
-    state.capturedContext = nil
-    state.partialTranscript = ""
-    state.inlineEditSelection = nil
 
-    // Capture the focused-element selection synchronously, RIGHT
-    // NOW, while the user's app still has focus and before any
-    // async effect work (sound, sleep prevention, AppleScript
-    // context capture) gets a chance to let focus drift. AX calls
-    // are main-thread-safe, the reducer runs on the main actor —
-    // no async hop required. See InlineEditClient.captureSelectionSync.
-    if state.hexSettings.inlineEditEnabled {
-      if let selection = inlineEdit.captureSelectionSync() {
-        state.inlineEditSelection = selection
-        transcriptionFeatureLogger.info("Inline edit: captured selection at hotkey-press (\(selection.count) chars)")
-      } else {
-        transcriptionFeatureLogger.info("Inline edit enabled but no selection captured — dictation will follow the normal paste path.")
-      }
-    }
+    // All modes (Dictate, Edit, Action) take the same path here.
+    // Edit-mode selection capture is deferred to handleStopRecording
+    // so no AX / clipboard work can interfere with recording start.
+    return beginRecording(&state)
+  }
+
+  /// Start audio recording and associated effects (sound, sleep
+  /// prevention, context capture). Mode-agnostic — Edit-mode
+  /// selection capture happens later in `handleStopRecording`.
+  func beginRecording(_ state: inout State) -> Effect<Action> {
+    state.isRecording = true
+    let startTime = now
+    state.recordingStartTime = startTime
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
 
     let contextEnrichmentEnabled = state.hexSettings.contextEnrichmentEnabled && state.hexSettings.aiProcessingEnabled
-    // liveTranscriptEnabled / selectedModel / outputLanguage are intentionally unread
-    // here — the live transcription effect is disabled (see note below). Re-introduce
-    // them when the streaming path returns.
 
-    // Prevent system sleep during recording.
-    //
-    // Note: inline-edit selection capture used to live inside this
-    // effect, but it's been moved up into the reducer body above so
-    // the AX query happens at the *instant* of hotkey press rather
-    // than after the effect-task spin-up + sleep prevention +
-    // context capture (the latter can take 100+ ms). That removes
-    // a class of race conditions where focus drifted before AX
-    // could read the selection.
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
       .cancel(id: CancelID.liveTranscription),
@@ -469,6 +553,27 @@ private extension TranscriptionFeature {
       )
     }
 
+    // ── Edit mode: capture selection at stop time ──
+    //
+    // Selection capture is done HERE (not at recording start) so that
+    // no AX calls or clipboard work can block or delay the recording.
+    // The source app is still frontmost with text highlighted because
+    // the HUD is a non-activating panel, so AX reads the same state
+    // the user saw when they pressed the hotkey.
+    let isEditMode = state.selectedMode == .edit
+    if isEditMode || state.hexSettings.inlineEditEnabled {
+      if let selection = inlineEdit.captureSelectionSync() {
+        state.inlineEditSelection = selection
+        transcriptionFeatureLogger.info(
+          "Edit capture: AX got \(selection.count) chars at stop time"
+        )
+      } else if !isEditMode {
+        transcriptionFeatureLogger.info(
+          "Inline edit enabled but no selection — normal paste path"
+        )
+      }
+    }
+
     // Otherwise, proceed to transcription
     state.isTranscribing = true
     state.error = nil
@@ -478,38 +583,57 @@ private extension TranscriptionFeature {
 
     state.isPrewarming = true
 
-    return .merge(
-    .cancel(id: CancelID.liveTranscription),
-    .run { [sleepManagement] send in
-      // Allow system to sleep again
-      await sleepManagement.allowSleep()
+    let transcriptionEffect: Effect<Action> = .merge(
+      .cancel(id: CancelID.liveTranscription),
+      .run { [sleepManagement] send in
+        // Allow system to sleep again
+        await sleepManagement.allowSleep()
 
-      var audioURL: URL?
-      do {
-        let capturedURL = await recording.stopRecording()
-        guard !Task.isCancelled else { return }
-        soundEffect.play(.stopRecording)
-        audioURL = capturedURL
+        var audioURL: URL?
+        do {
+          let capturedURL = await recording.stopRecording()
+          guard !Task.isCancelled else { return }
+          soundEffect.play(.stopRecording)
+          audioURL = capturedURL
 
-        // Create transcription options with the selected language
-        // Note: cap concurrency to avoid audio I/O overloads on some Macs
-        let decodeOptions = DecodingOptions(
-          language: language,
-          detectLanguage: language == nil, // Only auto-detect if no language specified
-          chunkingStrategy: .vad,
-        )
-        
-        let result = try await transcription.transcribe(capturedURL, model, decodeOptions) { _ in }
-        
-        transcriptionFeatureLogger.notice("Transcribed audio from \(capturedURL.lastPathComponent) to text length \(result.count)")
-        await send(.transcriptionResult(result, capturedURL))
-      } catch {
-        transcriptionFeatureLogger.error("Transcription failed: \(error.localizedDescription)")
-        await send(.transcriptionError(error, audioURL))
+          // Create transcription options with the selected language
+          // Note: cap concurrency to avoid audio I/O overloads on some Macs
+          let decodeOptions = DecodingOptions(
+            language: language,
+            detectLanguage: language == nil, // Only auto-detect if no language specified
+            chunkingStrategy: .vad,
+          )
+
+          let result = try await transcription.transcribe(capturedURL, model, decodeOptions) { _ in }
+
+          transcriptionFeatureLogger.notice("Transcribed audio from \(capturedURL.lastPathComponent) to text length \(result.count)")
+          await send(.transcriptionResult(result, capturedURL))
+        } catch {
+          transcriptionFeatureLogger.error("Transcription failed: \(error.localizedDescription)")
+          await send(.transcriptionError(error, audioURL))
+        }
       }
-    }
-    .cancellable(id: CancelID.transcription)
+      .cancellable(id: CancelID.transcription)
     )
+
+    // If Edit mode and AX didn't capture, run clipboard fallback
+    // (~150 ms) in parallel with transcription (~1-3 s). The
+    // fallback result lands via editClipboardFallbackResult well
+    // before handleTranscriptionResult needs it.
+    if isEditMode && state.inlineEditSelection == nil {
+      transcriptionFeatureLogger.info(
+        "Edit mode: AX returned nil at stop — trying clipboard fallback in parallel with transcription"
+      )
+      return .merge(
+        transcriptionEffect,
+        .run { [inlineEdit] send in
+          let selection = await inlineEdit.captureSelectionViaClipboard()
+          await send(.editClipboardFallbackResult(selection))
+        }
+      )
+    }
+
+    return transcriptionEffect
   }
 }
 
@@ -635,10 +759,10 @@ private extension TranscriptionFeature {
     )
 
     // Inline-edit branch: user had text selected when they started
-    // dictating AND inlineEditEnabled is on. Skip the normal AI mode
-    // + paste flow entirely and instead ask the LLM to transform the
-    // selection according to the dictated instruction, then replace
-    // the selection via AX.
+    // dictating AND (Edit mode is active OR inlineEditEnabled is on).
+    // Skip the normal AI mode + paste flow and instead ask the LLM
+    // to transform the selection per the dictated instruction, then
+    // replace it via AX. On success, surface an Accept/Undo pill.
     if let selection = inlineEditSelection, !modifiedResult.isEmpty {
       state.isAIProcessing = true
       return .run { [aiProcessing, inlineEdit, pasteboard] send in
@@ -649,19 +773,22 @@ private extension TranscriptionFeature {
         do {
           let edited = try await aiProcessing.process(
             userMessage,
-            .clean,               // placeholder mode; overridden by customSystemPrompt below
+            .clean,
             aiProvider,
-            nil,                  // no context enrichment for inline edit
+            nil,
             InlineEditPrompt.systemPrompt
           )
           await send(.aiProcessingFinished)
 
-          // Replace the selection directly via AX. If that fails
-          // (target element lost focus, app doesn't expose AX, etc.)
-          // fall back to pasting the edited text so the user isn't
-          // left with nothing.
           let replaced = await inlineEdit.replaceSelection(edited)
-          if !replaced {
+          if replaced {
+            // Surface accept/undo pill in the HUD.
+            await send(.inlineEditApplied(PendingEditResult(
+              original: selection,
+              edited: edited,
+              sourceAppBundleID: sourceAppBundleID
+            )))
+          } else {
             transcriptionFeatureLogger.warning("Inline edit: AX replace failed; falling back to paste")
             await pasteboard.paste(edited, sourceAppBundleID)
           }
@@ -872,24 +999,24 @@ struct TranscriptionView: View {
       return .transcribing
     } else if store.isRecording {
       return .recording
-    } else if store.isPrewarming {
-      return .prewarming
     } else {
-      return .hidden
+      return .idle
     }
   }
 
   var body: some View {
-    VStack(spacing: 8) {
-      TranscriptionIndicatorView(
-        status: status,
-        meter: store.meter
-      )
-      LiveTranscriptView(
-        text: store.partialTranscript,
-        isVisible: store.isRecording && store.hexSettings.liveTranscriptEnabled
-      )
-    }
+    TranscriptionIndicatorView(
+      status: status,
+      mode: store.selectedMode,
+      meter: store.meter,
+      recordingStartTime: store.recordingStartTime,
+      editMessage: store.editNeedsSelectionMessage,
+      pendingEditResult: store.pendingEditResult,
+      onCycleMode: { store.send(.cycleMode) },
+      onEditAccept: { store.send(.inlineEditAccept) },
+      onEditUndo: { store.send(.inlineEditUndo) }
+    )
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
     .task {
       await store.send(.task).finish()
     }

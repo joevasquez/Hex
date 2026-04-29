@@ -797,6 +797,7 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Hex/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Quill needs to control keyboard events to simulate paste operations.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Joe Vasquez. All rights reserved.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Quill needs microphone access in order to transcribe your voice.";
@@ -851,6 +852,7 @@
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Hex/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Quill needs to control keyboard events to simulate paste operations.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Joe Vasquez. All rights reserved.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Quill needs microphone access in order to transcribe your voice.";

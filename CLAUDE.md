@@ -84,7 +84,13 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
    - Both AI clients (`AIProcessingClient` on macOS, `TextAIClient` on iOS) accept an optional `customSystemPrompt` override — call sites resolve the prompt from the current selection and pass it through.
    - User messages are wrapped in `<transcript>…</transcript>` tags by `TranscriptWrapper`; `TranscriptRefusalDetector` catches "I am a post-processor"-style refusals and falls back to the raw transcript so the user's dictation is never replaced by an assistant-style reply.
 
-9. **Inline Edit (macOS)**: opt-in via `hexSettings.inlineEditEnabled`. When on and the focused app has a selection at recording-start, `TranscriptionFeature` captures it into `state.inlineEditSelection` (via `InlineEditClient.captureSelection`), treats the dictation as an *instruction*, and at finalize routes through the AI with `InlineEditPrompt.systemPrompt` + user message `"Instruction: <dictated> \n<selection>…</selection>"`. `InlineEditClient.replaceSelection` writes the edited text back via AX; falls back to normal paste if AX replacement fails.
+9. **Inline Edit (macOS)**: Active in Edit mode (HUD pill cycle) or when `hexSettings.inlineEditEnabled` is on. The user highlights text in any app, holds the hotkey, speaks an instruction ("tighten 20%", "translate to Spanish"), and releases. The pipeline: record → transcribe → send instruction + selection to LLM (`InlineEditPrompt.systemPrompt`) → replace selection via AX → show Accept/Undo pill on the HUD. Falls back to normal paste if AX replacement fails.
+
+   **Critical architecture note — selection capture timing:** Selection capture (`InlineEditClient.captureSelectionSync`) happens in `handleStopRecording`, NOT `handleStartRecording`. This is intentional. AX calls in the reducer at recording-start blocked/interfered with the recording effect chain in TCA, causing Edit mode to silently fail to record. Moving capture to stop time works because the HUD is a non-activating `NSPanel`, so the source app is still frontmost with text highlighted when the user releases the hotkey. If AX fails (common in Chrome/Electron), a clipboard fallback (Cmd+C simulation via CGEvent) runs in parallel with transcription (~150ms vs ~1-3s).
+
+   **Selection capture strategy (two-tier):**
+   - **Tier 1 — AX sync** (`captureSelectionSync`): reads `kAXSelectedTextAttribute` from the focused element. Fast, no side effects. Works in native AppKit apps and most Cocoa text views.
+   - **Tier 2 — Clipboard fallback** (`captureSelectionViaClipboard`): simulates Cmd+C, reads pasteboard, restores original clipboard. Works in Chrome, Electron (Slack, VS Code, Discord), and apps with non-standard text controls. Same approach as Raycast/Rewind.
 
 10. **Integrations surface (frontend-only)**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections. Settings UIs (`IntegrationsSectionView` on macOS, `IntegrationsView` on iOS) show "Coming Soon" on Connect — send adapters per integration land in a follow-up.
 
@@ -230,11 +236,34 @@ Defaults: model = `openai_whisper-tiny.en`, mode = `off`, provider = `anthropic`
 
 The iOS target is a `PBXFileSystemSynchronizedRootGroup` — new files in `Quill iOS/` are auto-included, no `pbxproj` edits needed. Shared files from `Hex/Clients/` are pulled into the iOS target via an explicit `membershipExceptions` list in `project.pbxproj`. Xcode occasionally normalizes bundle-ID quoting in the `pbxproj` on build; revert those with `git checkout -- Hex.xcodeproj/project.pbxproj` to keep diffs clean.
 
+## Lessons Learned (for agents)
+
+1. **Never do AX work in `handleStartRecording`.** macOS Accessibility queries (`AXUIElementCopyAttributeValue`) can block, time out (0.5s per call), or silently corrupt the TCA effect chain when called synchronously inside the reducer at recording-start. This caused Edit mode to fail to record while Dictate/Action worked fine — same `beginRecording()` call, but the AX calls before it poisoned the path. The fix: defer all AX/clipboard work to `handleStopRecording`, where it can't block the recording effect.
+
+2. **`@DependencyClient` macro name collisions.** The TCA `@DependencyClient` macro generates underscore-prefixed backing stores for each property (e.g., `_captureSelectionViaClipboard`). If you define a free function with that same underscore-prefixed name, the compiler silently picks the wrong one. Name helper functions distinctly (e.g., `clipboardFallbackCapture()` instead of `_captureSelectionViaClipboard()`).
+
+3. **Race conditions with async clipboard fallback + hotkey release.** If recording start is deferred behind an `async` clipboard capture (~150ms), the user can release the hotkey during that window. `isRecording` is still `false`, so the release is ignored. Recording then starts with no future release event to stop it. Fix: always start recording synchronously first, run fallback captures in parallel.
+
+4. **Non-activating panels preserve focus.** `HUDPanel` is `NSPanel` with `.nonactivatingPanel` — it doesn't steal focus from the source app. This is why selection capture at stop-time works: the source app is still frontmost with text highlighted.
+
+## Enhancement Opportunities
+
+1. **Action mode**: The third HUD mode (Dictate → Edit → Action) is wired in the UI but has no distinct behavior — it currently acts like Dictate. Could be used for agentic actions (create task, send message, set reminder) triggered by voice commands.
+
+2. **Streaming transcription**: Live partial transcripts are disabled (single-model lock stalls the event tap). Re-enabling with a dedicated lightweight model or WhisperKit streaming API would give real-time feedback during recording.
+
+3. **Edit mode "no selection" UX**: When both AX and clipboard fallback fail to capture a selection, the dictation falls through to normal paste. Could show a transient HUD banner ("No text selected — pasted as dictation") so the user understands why their edit instruction wasn't applied.
+
+4. **Per-app AX skip list**: Some apps (Chrome, Electron) never respond to `kAXSelectedTextAttribute`. Could maintain a bundle-ID skip list to go straight to clipboard fallback, saving the AX timeout.
+
+5. **Edit mode undo stack**: Currently tracks one pending edit (Accept/Undo pill). Could support multi-level undo for consecutive edits to the same selection.
+
 ## Troubleshooting
 
 - Repeated mic prompts during debug: ensure Debug signing uses "Apple Development" so TCC sticks
 - Sandbox network errors (‑1003): add `com.apple.security.network.client = true` (already set)
 - Parakeet not detected: ensure it resides under the container path above; downloading from Hex places it correctly.
+- **Edit mode not recording**: If Edit mode silently fails to record while Dictate works, check that `handleStartRecording` does NOT call any AX functions. All selection capture must happen in `handleStopRecording`. See "Lessons Learned" above.
 
 ## Changelog Workflow Expectations
 

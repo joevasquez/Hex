@@ -1,57 +1,14 @@
-import ComposableArchitecture
-import HexCore
-import Inject
 import SwiftUI
 
-struct SettingsView: View {
-	@ObserveInjection var inject
-	@Bindable var store: StoreOf<SettingsFeature>
-	let microphonePermission: PermissionStatus
-	let accessibilityPermission: PermissionStatus
-	let inputMonitoringPermission: PermissionStatus
-  
-	var body: some View {
-		Form {
-			if microphonePermission != .granted
-				|| accessibilityPermission != .granted
-				|| inputMonitoringPermission != .granted {
-				PermissionsSectionView(
-					store: store,
-					microphonePermission: microphonePermission,
-					accessibilityPermission: accessibilityPermission,
-					inputMonitoringPermission: inputMonitoringPermission
-				)
-			}
-
-			ModelSectionView(store: store, shouldFlash: store.shouldFlashModelSection)
-			// Only show language picker for WhisperKit models (not Parakeet)
-			if ParakeetModel(rawValue: store.hexSettings.selectedModel) == nil {
-				LanguageSectionView(store: store)
-			}
-
-			HotKeySectionView(store: store)
-          
-			if microphonePermission == .granted {
-				MicrophoneSelectionSectionView(store: store)
-			}
-
-			SoundSectionView(store: store)
-			GeneralSectionView(store: store)
-			AIProcessingSectionView(store: store)
-			HistorySectionView(store: store)
-		}
-		.formStyle(.grouped)
-		.task {
-			await store.send(.task).finish()
-		}
-		.enableInjection()
-	}
-}
-
-// MARK: - Shared Styles
+// The old monolithic `SettingsView` — which stuffed every section
+// into a single Form — was split into focused sidebar destinations
+// in 0.9.x. See `SettingsTabs.swift` for the per-tab wrappers
+// (General / Recording / AI / Integrations). What remains in this
+// file is just the shared text style every section view uses.
 
 extension Text {
-	/// Applies caption font with secondary color, commonly used for helper/description text in settings.
+	/// Applies caption font with secondary color, commonly used for
+	/// helper / description text in settings sections.
 	func settingsCaption() -> some View {
 		self.font(.caption).foregroundStyle(.secondary)
 	}

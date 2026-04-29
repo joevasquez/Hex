@@ -58,6 +58,21 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var voiceCommandsEnabled: Bool
 	public var contextEnrichmentEnabled: Bool
 	public var liveTranscriptEnabled: Bool
+	/// User-defined AI post-processing modes. Complement the built-in
+	/// `AIProcessingMode` cases — e.g. "Clinical note", "VC update",
+	/// "Code review email". See `CustomAIMode` for the data shape.
+	public var customAIModes: [CustomAIMode]
+	/// When on, if text is already selected in the focused app when
+	/// the user starts dictating, the dictation is treated as an
+	/// *instruction* ("tighten 20%", "translate to Spanish") and the
+	/// selected text is edited in-place via the LLM instead of being
+	/// appended. Off by default — changes the dictation behavior
+	/// enough that users should opt in.
+	public var inlineEditEnabled: Bool
+	/// Set to `true` once the user finishes (or skips through) the
+	/// first-launch onboarding walk-through. Resetting it to `false`
+	/// from Settings → General → "Replay Tutorial" re-enters the flow.
+	public var hasCompletedOnboarding: Bool
 
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
@@ -76,7 +91,12 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		preventSystemSleep: Bool = true,
 		recordingAudioBehavior: RecordingAudioBehavior = .doNothing,
 		minimumKeyTime: Double = HexCoreConstants.defaultMinimumKeyTime,
-		copyToClipboard: Bool = false,
+		// Default changed from `false` → `true` in 0.8.5: leaving the
+		// transcription in the clipboard is safer than restoring the
+		// user's previous clipboard (which races the target app's
+		// paste handler and can result in pasting sensitive content
+		// like API keys when a paste completes late).
+		copyToClipboard: Bool = true,
 		superFastModeEnabled: Bool = false,
 		useDoubleTapOnly: Bool = false,
 		doubleTapLockEnabled: Bool = true,
@@ -97,7 +117,10 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		appModeRules: [AppModeRule] = [],
 		voiceCommandsEnabled: Bool = false,
 		contextEnrichmentEnabled: Bool = false,
-		liveTranscriptEnabled: Bool = false
+		liveTranscriptEnabled: Bool = false,
+		customAIModes: [CustomAIMode] = [],
+		inlineEditEnabled: Bool = true,
+		hasCompletedOnboarding: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -131,6 +154,9 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.voiceCommandsEnabled = voiceCommandsEnabled
 		self.contextEnrichmentEnabled = contextEnrichmentEnabled
 		self.liveTranscriptEnabled = liveTranscriptEnabled
+		self.customAIModes = customAIModes
+		self.inlineEditEnabled = inlineEditEnabled
+		self.hasCompletedOnboarding = hasCompletedOnboarding
 		normalizeDoubleTapSettings()
 	}
 
@@ -187,6 +213,9 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case voiceCommandsEnabled
 	case contextEnrichmentEnabled
 	case liveTranscriptEnabled
+	case customAIModes
+	case inlineEditEnabled
+	case hasCompletedOnboarding
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -328,6 +357,9 @@ private enum HexSettingsSchema {
 		SettingsField(.voiceCommandsEnabled, keyPath: \.voiceCommandsEnabled, default: defaults.voiceCommandsEnabled).eraseToAny(),
 		SettingsField(.contextEnrichmentEnabled, keyPath: \.contextEnrichmentEnabled, default: defaults.contextEnrichmentEnabled).eraseToAny(),
 		SettingsField(.liveTranscriptEnabled, keyPath: \.liveTranscriptEnabled, default: defaults.liveTranscriptEnabled).eraseToAny(),
+		SettingsField(.customAIModes, keyPath: \.customAIModes, default: defaults.customAIModes).eraseToAny(),
+		SettingsField(.inlineEditEnabled, keyPath: \.inlineEditEnabled, default: defaults.inlineEditEnabled).eraseToAny(),
+		SettingsField(.hasCompletedOnboarding, keyPath: \.hasCompletedOnboarding, default: defaults.hasCompletedOnboarding).eraseToAny(),
 	]
 }
 

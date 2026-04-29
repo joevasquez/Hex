@@ -30,12 +30,45 @@ final class RecordingViewModel: ObservableObject {
   @Published var livePartial: String = ""
   @Published var meterLevel: Float = 0
   @Published var elapsedSeconds: TimeInterval = 0
+  /// Set when an AI post-processing call failed and we fell back to
+  /// the raw transcript. Cleared on the next successful run.
+  @Published var aiErrorMessage: String?
+  /// True while the WhisperKit model is loading (first launch, or
+  /// after the user changes models in Settings). Surfaced in the
+  /// status area so the user knows why the first transcription is
+  /// slower than subsequent ones — otherwise it looks like AI
+  /// processing is hanging.
+  @Published var isPreparingModel: Bool = false
 
   private var recorder = IOSRecordingClient.shared
   private var whisperKit: WhisperKit?
   private var timerTask: Task<Void, Never>?
   private var recordingStartedAt: Date?
   private var cancellables: Set<AnyCancellable> = []
+
+  /// Prepare (download if needed + load) the Whisper model for
+  /// `modelName` ahead of any recording. Doing this on app launch
+  /// means the first real transcription doesn't block on a 1–2
+  /// minute WhisperKit init. Safe to call multiple times — it's a
+  /// no-op when the requested model is already loaded.
+  func prewarmModel(_ modelName: String) async {
+    // Already loaded and matching? Nothing to do.
+    if whisperKit != nil, whisperKit?.modelFolder?.lastPathComponent == modelName {
+      return
+    }
+    isPreparingModel = true
+    defer { isPreparingModel = false }
+    do {
+      whisperKit = try await WhisperKit(
+        WhisperKitConfig(model: modelName, download: true)
+      )
+      print("RecordingViewModel: prewarmed Whisper model \(modelName)")
+    } catch {
+      // Non-fatal: if pre-warm fails (offline, corrupt cache, etc.)
+      // the normal transcription path will retry on first record.
+      print("RecordingViewModel: prewarm failed for \(modelName): \(error.localizedDescription)")
+    }
+  }
 
   init() {
     // Mirror the recorder's published live partial onto our own @Published so
@@ -59,13 +92,21 @@ final class RecordingViewModel: ObservableObject {
   func toggleRecording(
     model: String,
     mode: AIProcessingMode,
-    provider: AIProvider
+    provider: AIProvider,
+    voiceCommandsEnabled: Bool,
+    customSystemPrompt: String? = nil
   ) async {
     switch phase {
     case .idle, .done, .error:
       await startRecording(model: model, mode: mode, provider: provider)
     case .recording:
-      await stopAndProcess(model: model, mode: mode, provider: provider)
+      await stopAndProcess(
+        model: model,
+        mode: mode,
+        provider: provider,
+        voiceCommandsEnabled: voiceCommandsEnabled,
+        customSystemPrompt: customSystemPrompt
+      )
     default:
       break
     }
@@ -90,6 +131,7 @@ final class RecordingViewModel: ObservableObject {
     rawTranscript = ""
     processedTranscript = ""
     livePartial = ""
+    aiErrorMessage = nil
 
     do {
       _ = try recorder.startRecording()
@@ -117,7 +159,9 @@ final class RecordingViewModel: ObservableObject {
   private func stopAndProcess(
     model: String,
     mode: AIProcessingMode,
-    provider: AIProvider
+    provider: AIProvider,
+    voiceCommandsEnabled: Bool,
+    customSystemPrompt: String? = nil
   ) async {
     timerTask?.cancel()
     let url = recorder.stopRecording()
@@ -138,7 +182,17 @@ final class RecordingViewModel: ObservableObject {
 
       let results = try await whisperKit!.transcribe(audioPath: url.path)
       let rawText = results.map(\.text).joined(separator: " ")
-      let text = WhisperOutputCleaner.clean(rawText)
+      let cleaned = WhisperOutputCleaner.clean(rawText)
+      // Inline voice-command substitution: "period", "comma",
+      // "new paragraph" → real punctuation / line breaks. Runs before
+      // AI post-processing so downstream modes see properly-punctuated
+      // text. Gated by the user's Settings toggle.
+      let text = voiceCommandsEnabled
+        ? VoiceCommandSubstituter.substitute(in: cleaned)
+        : cleaned
+      if text != cleaned {
+        print("RecordingViewModel: applied voice-command substitutions")
+      }
       rawTranscript = text
 
       try? FileManager.default.removeItem(at: url)
@@ -148,13 +202,25 @@ final class RecordingViewModel: ObservableObject {
         return
       }
 
-      if mode != .off {
+      let shouldRunAI = mode != .off || customSystemPrompt != nil
+      if shouldRunAI {
         phase = .aiProcessing
         do {
-          processedTranscript = try await AIProcessingClient.liveValue.process(text, mode, provider, nil)
+          processedTranscript = try await TextAIClient.process(
+            text: text,
+            mode: mode,
+            provider: provider,
+            customSystemPrompt: customSystemPrompt
+          )
         } catch {
+          // Fall through with the raw transcript so recording isn't
+          // lost. The console log tells us why (usually: missing key).
           processedTranscript = ""
+          aiErrorMessage = "AI \(mode.displayName) failed — \(error.localizedDescription)"
+          print("TextAIClient failed: \(error.localizedDescription)")
         }
+      } else {
+        aiErrorMessage = nil
       }
 
       phase = .done
@@ -169,27 +235,58 @@ struct ContentView: View {
   @AppStorage(QuillIOSSettingsKey.selectedModel) private var selectedModel: String = QuillIOSSettingsKey.defaultModel
   @AppStorage(QuillIOSSettingsKey.aiProcessingMode) private var aiModeRaw: String = QuillIOSSettingsKey.defaultMode
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
+  @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
+  @AppStorage(CustomAIModesStorage.userDefaultsKey) private var customModesData: Data = Data()
 
   @StateObject private var vm = RecordingViewModel()
   @StateObject private var notes = NotesStore.shared
+  @EnvironmentObject private var deepLinks: QuillDeepLinkRouter
   @State private var showingSettings = false
   @State private var showingNotesList = false
   @State private var idlePulse = false
   @State private var lastAppendedTranscript: String = ""
   @State private var showCopied = false
   @State private var copyResetTask: Task<Void, Never>?
+  @State private var showingPhotoSourceDialog = false
+  @State private var showingCamera = false
+  @State private var showingLibrary = false
+  @State private var showingRenameAlert = false
+  @State private var renameDraft: String = ""
+  @State private var shareRequest: ShareRequest?
+  @State private var isBuildingPDF = false
+  @State private var pendingDeleteNoteID: UUID?
 
+  /// The currently-selected mode, which may be either a built-in
+  /// `AIProcessingMode` or a user-created custom mode. Stored as
+  /// string in `aiModeRaw` using `AIModeSelection.rawValue`
+  /// (e.g. `"clean"`, `"notes"`, or `"custom:<uuid>"`).
+  private var currentSelection: AIModeSelection {
+    AIModeSelection(rawValue: aiModeRaw) ?? .builtIn(.off)
+  }
+
+  /// Back-compat helper — treated as `.off` whenever the current
+  /// selection is a custom mode. Code paths that need to know
+  /// "is AI processing on at all" should use
+  /// `currentSelection.resolveSystemPrompt(...) != nil` instead.
   private var aiMode: AIProcessingMode {
-    AIProcessingMode(rawValue: aiModeRaw) ?? .clean
+    if case .builtIn(let mode) = currentSelection { return mode }
+    // Custom mode selected — behaves like a non-off mode for UI
+    // colouring. `.clean` is a reasonable placeholder because it's
+    // purple-tinted and indicates "AI is on".
+    return .clean
   }
 
   private var aiProvider: AIProvider {
     AIProvider(rawValue: aiProviderRaw) ?? .anthropic
   }
 
+  private var customModes: [CustomAIMode] {
+    CustomAIModesStorage.decode(customModesData)
+  }
+
   var body: some View {
     NavigationStack {
-      ZStack {
+      ZStack(alignment: .bottomTrailing) {
         backgroundGradient
           .ignoresSafeArea()
 
@@ -197,18 +294,31 @@ struct ContentView: View {
           headerBar
           activeNoteStrip
 
-          ScrollView {
-            VStack(spacing: 28) {
-              modeChipRow
-              recordButton
-              statusLabel
-              resultArea
-              Spacer(minLength: 40)
+          ScrollViewReader { proxy in
+            ScrollView {
+              VStack(spacing: 20) {
+                modeChipRow
+                resultArea
+                // Reserve space below the note so the floating mic/camera
+                // cluster doesn't overlap the last line or action buttons.
+                Color.clear.frame(height: 140).id("noteBottom")
+              }
+              .padding(.horizontal)
+              .padding(.top, 16)
             }
-            .padding(.horizontal)
-            .padding(.top, 16)
+            // Animate the outer scroll so the newest transcript/photo
+            // lands just above the FAB cluster rather than off-screen.
+            .onChange(of: notes.activeNote?.body) { _, _ in
+              withAnimation(.easeOut(duration: 0.4)) {
+                proxy.scrollTo("noteBottom", anchor: .bottom)
+              }
+            }
           }
         }
+
+        bottomActionCluster
+          .padding(.trailing, 20)
+          .padding(.bottom, 24)
       }
       .toolbar(.hidden, for: .navigationBar)
       .sheet(isPresented: $showingSettings) {
@@ -217,11 +327,174 @@ struct ContentView: View {
       .sheet(isPresented: $showingNotesList) {
         NotesListView(store: notes)
       }
-      .onAppear { idlePulse = true }
+      .sheet(isPresented: $showingCamera) {
+        CameraPicker { image in
+          showingCamera = false
+          if let image { handlePickedPhoto(image) }
+        }
+        .ignoresSafeArea()
+      }
+      .sheet(isPresented: $showingLibrary) {
+        PhotoLibraryPicker { image in
+          showingLibrary = false
+          if let image { handlePickedPhoto(image) }
+        }
+      }
+      .confirmationDialog("Add Photo", isPresented: $showingPhotoSourceDialog, titleVisibility: .visible) {
+        if UIImagePickerController.isSourceTypeAvailable(.camera) {
+          Button("Take Photo") { showingCamera = true }
+        }
+        Button("Choose from Library") { showingLibrary = true }
+        Button("Cancel", role: .cancel) {}
+      }
+      .alert("Rename Note", isPresented: $showingRenameAlert) {
+        TextField("Title", text: $renameDraft)
+        Button("Save") { commitRename() }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text("Leave blank to auto-derive from the first line of the note.")
+      }
+      .alert("Delete Note?", isPresented: Binding(
+        get: { pendingDeleteNoteID != nil },
+        set: { if !$0 { pendingDeleteNoteID = nil } }
+      )) {
+        Button("Delete", role: .destructive) {
+          if let id = pendingDeleteNoteID {
+            notes.deleteNote(id: id)
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+          }
+          pendingDeleteNoteID = nil
+        }
+        Button("Cancel", role: .cancel) { pendingDeleteNoteID = nil }
+      } message: {
+        Text("This removes the note and all attached photos. This can't be undone.")
+      }
+      .sheet(item: $shareRequest) { req in
+        ShareSheet(items: req.items)
+      }
+      .onAppear {
+        idlePulse = true
+        // Pre-warm the Whisper model immediately on first appear so
+        // the initial transcription doesn't block on a long
+        // download + load. Happens in the background — user can
+        // still interact with everything else.
+        Task { await vm.prewarmModel(selectedModel) }
+      }
+      .onChange(of: selectedModel) { _, newModel in
+        Task { await vm.prewarmModel(newModel) }
+      }
+      .onChange(of: deepLinks.pendingLink) { _, link in
+        guard let link else { return }
+        switch link.link {
+        case .record:
+          // Widget tap: always start a FRESH note, then begin
+          // recording. Appending to an existing active note would
+          // feel surprising to a user who just tapped a home-screen
+          // widget — they expect a dedicated new capture.
+          Task {
+            let loc = await LocationClient.shared.currentPlace()
+            _ = notes.startNewNote(location: loc)
+            // Delay briefly to let the app finish becoming active so
+            // the mic permission prompt (if any) and recording
+            // startup don't race UIKit window transitions.
+            try? await Task.sleep(for: .milliseconds(300))
+            await vm.toggleRecording(
+              model: selectedModel,
+              mode: aiMode,
+              provider: aiProvider,
+              voiceCommandsEnabled: voiceCommandsEnabled
+            )
+            deepLinks.consume()
+          }
+        case .notes:
+          showingNotesList = true
+          deepLinks.consume()
+        }
+      }
       .onChange(of: vm.phase) { _, newPhase in
         if case .done = newPhase {
           appendTranscriptToActiveNote()
         }
+      }
+    }
+  }
+
+  // MARK: - Photo flow
+
+  /// Tapped from the active-note strip. If a recording is in flight, stop
+  /// it first (so the dictated text is committed to the note before the
+  /// photo lands), then present the source chooser.
+  private func tapAddPhoto() {
+    UISelectionFeedbackGenerator().selectionChanged()
+    if vm.phase == .recording {
+      Task {
+        await vm.toggleRecording(
+          model: selectedModel,
+          mode: aiMode,
+          provider: aiProvider,
+          voiceCommandsEnabled: voiceCommandsEnabled,
+          customSystemPrompt: currentSelection.resolveSystemPrompt(customModes: customModes).flatMap { _ in
+            // Only pass a custom prompt when the selection IS a custom mode;
+            // built-in selections use their own `mode.systemPrompt` via `aiMode`.
+            if case .custom = currentSelection {
+              return currentSelection.resolveSystemPrompt(customModes: customModes)
+            }
+            return nil
+          }
+        )
+        showingPhotoSourceDialog = true
+      }
+    } else {
+      showingPhotoSourceDialog = true
+    }
+  }
+
+  private func handlePickedPhoto(_ image: UIImage) {
+    Task {
+      let loc = notes.activeNote == nil
+        ? await LocationClient.shared.currentPlace()
+        : nil
+      if let ids = notes.insertPhotoIntoActiveNote(image, locationIfCreating: loc) {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        // Fire-and-forget: the store flips `analyzingPhotoIDs` and
+        // publishes the result so the view refreshes automatically.
+        notes.analyzePhoto(noteID: ids.noteID, photoID: ids.photoID, provider: aiProvider)
+      }
+    }
+  }
+
+  // MARK: - Rename flow
+
+  /// Pre-fill the rename draft with the user's stored title (not the
+  /// derived one) so saving an empty string falls back to derivation.
+  private func tapRenameTitle() {
+    guard let note = notes.activeNote else { return }
+    UISelectionFeedbackGenerator().selectionChanged()
+    renameDraft = note.title
+    showingRenameAlert = true
+  }
+
+  private func commitRename() {
+    guard let id = notes.activeNoteID else { return }
+    let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    notes.renameNote(id: id, to: trimmed)
+  }
+
+  // MARK: - Share flow
+
+  private func shareNoteText(_ note: Note) {
+    let text = NoteContent.stripPhotos(from: note.body)
+    guard !text.isEmpty else { return }
+    shareRequest = ShareRequest(items: [text])
+  }
+
+  private func sharePDF(_ note: Note) {
+    isBuildingPDF = true
+    let snapshot = notes.photoAnalyses
+    Task { @MainActor in
+      defer { isBuildingPDF = false }
+      if let url = NotePDFExporter.export(note, analyses: snapshot) {
+        shareRequest = ShareRequest(items: [url])
       }
     }
   }
@@ -239,6 +512,37 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
 
       Spacer()
+
+      Button {
+        UISelectionFeedbackGenerator().selectionChanged()
+        showingNotesList = true
+      } label: {
+        Image(systemName: "list.bullet")
+          .font(.title3.weight(.semibold))
+          .foregroundStyle(.white)
+          .frame(width: 36, height: 36)
+          .background(Circle().fill(Color.white.opacity(0.18)))
+          .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("All notes")
+
+      Button {
+        UISelectionFeedbackGenerator().selectionChanged()
+        Task {
+          let loc = await LocationClient.shared.currentPlace()
+          _ = notes.startNewNote(location: loc)
+        }
+      } label: {
+        Image(systemName: "square.and.pencil")
+          .font(.title3.weight(.semibold))
+          .foregroundStyle(.white)
+          .frame(width: 36, height: 36)
+          .background(Circle().fill(Color.white.opacity(0.18)))
+          .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Start new note")
 
       Button {
         UISelectionFeedbackGenerator().selectionChanged()
@@ -280,23 +584,13 @@ struct ContentView: View {
   }
 
   private var logoMark: some View {
-    ZStack {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(Color.white.opacity(0.95))
-        .frame(width: 38, height: 38)
-        .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
-
-      Image(systemName: "pencil.tip")
-        .font(.system(size: 20, weight: .semibold))
-        .foregroundStyle(
-          LinearGradient(
-            colors: [Color(red: 0.35, green: 0.15, blue: 0.55), Color(red: 0.25, green: 0.20, blue: 0.60)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-          )
-        )
-        .rotationEffect(.degrees(-12))
-    }
+    Image("Feather")
+      .resizable()
+      .renderingMode(.template)
+      .aspectRatio(contentMode: .fit)
+      .foregroundStyle(.white)
+      .frame(width: 34, height: 34)
+      .shadow(color: .black.opacity(0.25), radius: 3, y: 2)
   }
 
   // MARK: - Active-note strip
@@ -310,49 +604,31 @@ struct ContentView: View {
         .font(.subheadline)
         .foregroundStyle(.purple)
 
-      VStack(alignment: .leading, spacing: 1) {
-        Text(notes.activeNote?.displayTitle ?? "No active note")
-          .font(.subheadline.weight(.semibold))
-          .lineLimit(1)
-          .foregroundStyle(.primary)
-        Text(activeNoteSubtitle)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
+      Button(action: tapRenameTitle) {
+        VStack(alignment: .leading, spacing: 1) {
+          HStack(spacing: 4) {
+            Text(notes.activeNote?.displayTitle ?? "No active note")
+              .font(.subheadline.weight(.semibold))
+              .lineLimit(1)
+              .foregroundStyle(.primary)
+            if notes.activeNote != nil {
+              Image(systemName: "pencil")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+          }
+          Text(activeNoteSubtitle)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
       }
+      .buttonStyle(.plain)
+      .disabled(notes.activeNote == nil)
+      .accessibilityLabel("Rename active note")
 
       Spacer()
 
-      Button {
-        UISelectionFeedbackGenerator().selectionChanged()
-        Task {
-          // Capture location when the user explicitly starts a new note.
-          let loc = await LocationClient.shared.currentPlace()
-          _ = notes.startNewNote(location: loc)
-        }
-      } label: {
-        Label("New", systemImage: "square.and.pencil")
-          .labelStyle(.iconOnly)
-          .font(.subheadline.weight(.semibold))
-          .foregroundStyle(.purple)
-          .frame(width: 32, height: 32)
-          .background(Circle().fill(Color.purple.opacity(0.12)))
-      }
-      .buttonStyle(.plain)
-      .accessibilityLabel("Start new note")
-
-      Button {
-        UISelectionFeedbackGenerator().selectionChanged()
-        showingNotesList = true
-      } label: {
-        Image(systemName: "list.bullet")
-          .font(.subheadline.weight(.semibold))
-          .foregroundStyle(.purple)
-          .frame(width: 32, height: 32)
-          .background(Circle().fill(Color.purple.opacity(0.12)))
-      }
-      .buttonStyle(.plain)
-      .accessibilityLabel("All notes")
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
@@ -396,10 +672,15 @@ struct ContentView: View {
     if notes.activeNote == nil {
       Task {
         let loc = await LocationClient.shared.currentPlace()
-        notes.appendToActiveNote(text, locationIfCreating: loc)
+        let note = notes.appendToActiveNote(text, locationIfCreating: loc)
+        // Kick off AI title generation on the background. No-op if
+        // the note already has a locked-in title (user-renamed or
+        // previously AI-titled) — see `generateTitleIfNeeded`.
+        notes.generateTitleIfNeeded(noteID: note.id, provider: aiProvider)
       }
     } else {
-      notes.appendToActiveNote(text, locationIfCreating: nil)
+      let note = notes.appendToActiveNote(text, locationIfCreating: nil)
+      notes.generateTitleIfNeeded(noteID: note.id, provider: aiProvider)
     }
   }
 
@@ -423,13 +704,30 @@ struct ContentView: View {
   private var modeChipRow: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
+        // Built-in modes first — stable ordering, always present.
         ForEach(AIProcessingMode.allCases, id: \.rawValue) { mode in
+          let selected = currentSelection == .builtIn(mode)
           ModeChip(
             mode: mode,
-            isSelected: mode == aiMode,
+            isSelected: selected,
             action: {
               UISelectionFeedbackGenerator().selectionChanged()
-              aiModeRaw = mode.rawValue
+              aiModeRaw = AIModeSelection.builtIn(mode).rawValue
+            }
+          )
+        }
+
+        // User-authored custom modes after the built-ins. The chip
+        // style mirrors `ModeChip` so the row reads as one cohesive
+        // picker rather than two sections.
+        ForEach(customModes) { mode in
+          let selected = currentSelection == .custom(mode.id)
+          CustomModeChip(
+            mode: mode,
+            isSelected: selected,
+            action: {
+              UISelectionFeedbackGenerator().selectionChanged()
+              aiModeRaw = AIModeSelection.custom(mode.id).rawValue
             }
           )
         }
@@ -439,10 +737,115 @@ struct ContentView: View {
     .scrollClipDisabled()
   }
 
-  // MARK: - Record button
+  // MARK: - Bottom action cluster (mic + camera FABs)
+
+  private var bottomActionCluster: some View {
+    VStack(alignment: .trailing, spacing: 12) {
+      statusCard
+      HStack(spacing: 14) {
+        cameraFAB
+        micFAB
+      }
+    }
+  }
+
+  /// Compact floating status card rendered above the FAB cluster. Only
+  /// visible for non-idle phases; hidden when `.idle` or `.done` so the
+  /// notes underneath stay clean.
+  @ViewBuilder
+  private var statusCard: some View {
+    if let aiError = vm.aiErrorMessage, vm.phase == .done {
+      statusPill(aiError, icon: "exclamationmark.triangle", tint: .orange)
+    }
+    // Whisper model load runs on first launch (and when the user
+    // switches models). The first transcription blocks on this if
+    // it hasn't finished — surface it so users see "Loading model"
+    // rather than a 60-120 s hang during "Transcribing…".
+    if vm.isPreparingModel, vm.phase != .recording {
+      statusPill("Loading Whisper model…", icon: "arrow.down.circle", tint: .blue)
+    }
+    switch vm.phase {
+    case .recording:
+      VStack(alignment: .trailing, spacing: 6) {
+        Text(formatElapsed(vm.elapsedSeconds))
+          .font(.system(size: 18, weight: .semibold, design: .rounded))
+          .foregroundStyle(.red)
+          .monospacedDigit()
+        if !vm.livePartial.isEmpty {
+          Text(vm.livePartial)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .italic()
+            .multilineTextAlignment(.trailing)
+            .lineLimit(3)
+            .frame(maxWidth: 260, alignment: .trailing)
+            .animation(.easeOut(duration: 0.15), value: vm.livePartial)
+            .transition(.opacity)
+        }
+      }
+      .padding(10)
+      .background(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(.ultraThinMaterial)
+      )
+    case .requestingPermission:
+      statusPill("Requesting mic…", icon: "mic.slash", tint: .secondary)
+    case .transcribing:
+      statusPill("Transcribing…", icon: "waveform", tint: .blue)
+    case .aiProcessing:
+      statusPill("Enhancing with \(aiProvider.displayName)…", icon: "sparkles", tint: .purple)
+    case .error(let msg):
+      statusPill(msg, icon: "exclamationmark.triangle", tint: .red)
+    case .idle, .done:
+      EmptyView()
+    }
+  }
+
+  private func statusPill(_ text: String, icon: String, tint: Color) -> some View {
+    Label(text, systemImage: icon)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(tint)
+      .lineLimit(2)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(
+        Capsule().fill(.ultraThinMaterial)
+      )
+      .frame(maxWidth: 260, alignment: .trailing)
+  }
+
+  /// Shared size for both FABs so they read as a matched pair.
+  private static let fabSize: CGFloat = 72
+  /// Outer bounding box — large enough to hold the main circle plus its
+  /// soft shadow/glow without spilling into its sibling or stretching
+  /// the cluster layout.
+  private static let fabSlot: CGFloat = 88
+
+  private var cameraFAB: some View {
+    Button(action: tapAddPhoto) {
+      Circle()
+        .fill(
+          LinearGradient(
+            colors: [Color.purple, Color.purple.opacity(0.82)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+          )
+        )
+        .frame(width: Self.fabSize, height: Self.fabSize)
+        .overlay(
+          Image(systemName: "camera.fill")
+            .font(.system(size: 26, weight: .semibold))
+            .foregroundStyle(.white)
+        )
+        .shadow(color: Color.purple.opacity(0.35), radius: 8, y: 4)
+        .frame(width: Self.fabSlot, height: Self.fabSlot)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel("Add photo to note")
+  }
 
   @ViewBuilder
-  private var recordButton: some View {
+  private var micFAB: some View {
     let isRecording = vm.phase == .recording
     let isBusy: Bool = {
       switch vm.phase {
@@ -450,8 +853,7 @@ struct ContentView: View {
       default: return false
       }
     }()
-
-    let buttonTint: Color = isRecording ? .red : (aiMode == .off ? .blue : .purple)
+    let tint: Color = isRecording ? .red : (aiMode == .off ? .blue : .purple)
     let level = CGFloat(vm.meterLevel)
 
     Button {
@@ -459,121 +861,60 @@ struct ContentView: View {
         await vm.toggleRecording(
           model: selectedModel,
           mode: aiMode,
-          provider: aiProvider
+          provider: aiProvider,
+          voiceCommandsEnabled: voiceCommandsEnabled,
+          customSystemPrompt: currentSelection.resolveSystemPrompt(customModes: customModes).flatMap { _ in
+            // Only pass a custom prompt when the selection IS a custom mode;
+            // built-in selections use their own `mode.systemPrompt` via `aiMode`.
+            if case .custom = currentSelection {
+              return currentSelection.resolveSystemPrompt(customModes: customModes)
+            }
+            return nil
+          }
         )
       }
     } label: {
       ZStack {
-        // Outer glow — reacts to audio when recording, breathes when idle
-        Circle()
-          .fill(buttonTint.opacity(isRecording ? 0.25 + level * 0.5 : 0.15))
-          .frame(width: 220, height: 220)
-          .blur(radius: 20)
-          .scaleEffect(isRecording ? 1.0 + level * 0.3 : (idlePulse ? 1.05 : 0.95))
-          .animation(.easeInOut(duration: 0.2), value: level)
-          .animation(
-            .easeInOut(duration: 1.8).repeatForever(autoreverses: true),
-            value: idlePulse
-          )
+        // Audio-reactive halo, only while recording. Contained inside
+        // the fabSlot via the outer `.frame` so the blur doesn't
+        // scatter across the cluster when it scales.
+        if isRecording {
+          Circle()
+            .fill(tint.opacity(0.3 + level * 0.4))
+            .frame(width: Self.fabSize + 8, height: Self.fabSize + 8)
+            .blur(radius: 6)
+            .scaleEffect(1.0 + level * 0.15)
+            .animation(.easeInOut(duration: 0.18), value: level)
+        }
 
-        // Main circle
         Circle()
           .fill(
             LinearGradient(
-              colors: [buttonTint, buttonTint.opacity(0.75)],
+              colors: [tint, tint.opacity(0.75)],
               startPoint: .topLeading,
               endPoint: .bottomTrailing
             )
           )
-          .frame(width: 160, height: 160)
-          .shadow(color: buttonTint.opacity(0.4), radius: 20, y: 10)
-          .scaleEffect(isRecording ? 1.0 + level * 0.12 : 1.0)
+          .frame(width: Self.fabSize, height: Self.fabSize)
+          .shadow(color: tint.opacity(0.4), radius: 8, y: 4)
+          .scaleEffect(isRecording ? 1.0 + level * 0.08 : 1.0)
           .animation(.easeInOut(duration: 0.15), value: level)
 
         if isBusy {
-          ProgressView()
-            .controlSize(.extraLarge)
-            .tint(.white)
+          ProgressView().controlSize(.regular).tint(.white)
         } else {
           Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-            .font(.system(size: 56, weight: .medium))
+            .font(.system(size: 28, weight: .medium))
             .foregroundStyle(.white)
             .symbolEffect(.bounce, value: isRecording)
         }
       }
+      .frame(width: Self.fabSlot, height: Self.fabSlot)
+      .compositingGroup()
     }
     .buttonStyle(.plain)
     .disabled(isBusy)
-    .padding(.top, 20)
-  }
-
-  // MARK: - Status
-
-  @ViewBuilder
-  private var statusLabel: some View {
-    Group {
-      switch vm.phase {
-      case .idle:
-        VStack(spacing: 4) {
-          Text("Tap to record")
-            .font(.headline)
-            .foregroundStyle(.secondary)
-          Text(aiMode == .off ? "Raw transcript" : "\(aiMode.displayName) · \(aiProvider.displayName)")
-            .font(.caption)
-            .foregroundStyle(.tertiary)
-        }
-      case .requestingPermission:
-        Text("Requesting microphone permission…")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-      case .recording:
-        VStack(spacing: 12) {
-          Text(formatElapsed(vm.elapsedSeconds))
-            .font(.system(size: 28, weight: .semibold, design: .rounded))
-            .foregroundStyle(.red)
-            .monospacedDigit()
-
-          livePartialView
-        }
-      case .transcribing:
-        Label("Transcribing…", systemImage: "waveform")
-          .font(.subheadline)
-          .foregroundStyle(.blue)
-      case .aiProcessing:
-        Label("Enhancing with \(aiProvider.displayName)…", systemImage: "sparkles")
-          .font(.subheadline)
-          .foregroundStyle(.purple)
-      case .done:
-        EmptyView()
-      case .error(let msg):
-        Label(msg, systemImage: "exclamationmark.triangle")
-          .font(.subheadline)
-          .foregroundStyle(.red)
-          .multilineTextAlignment(.center)
-          .padding(.horizontal)
-      }
-    }
-    .frame(minHeight: 44)
-  }
-
-  @ViewBuilder
-  private var livePartialView: some View {
-    if vm.livePartial.isEmpty {
-      Text("Listening…")
-        .font(.subheadline)
-        .foregroundStyle(.tertiary)
-        .italic()
-    } else {
-      Text(vm.livePartial)
-        .font(.body)
-        .foregroundStyle(.secondary)
-        .italic()
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.horizontal, 8)
-        .animation(.easeOut(duration: 0.15), value: vm.livePartial)
-        .transition(.opacity)
-    }
+    .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
   }
 
   private func formatElapsed(_ seconds: TimeInterval) -> String {
@@ -595,18 +936,16 @@ struct ContentView: View {
   @ViewBuilder
   private var resultArea: some View {
     if let note = notes.activeNote, !note.body.isEmpty {
-      VStack(alignment: .leading, spacing: 14) {
-        noteCanvas(for: note)
-        actionButtons(for: note.body)
-      }
-      .transition(.opacity.combined(with: .move(edge: .bottom)))
+      noteCanvas(for: note)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
   }
 
   private func noteCanvas(for note: Note) -> some View {
     let tint: Color = aiMode == .off ? .blue : .purple
+    let segments = NoteContent.segments(from: note.body)
     return VStack(alignment: .leading, spacing: 10) {
-      HStack(spacing: 8) {
+      HStack(spacing: 6) {
         Label(
           aiMode == .off ? "Transcript" : "\(aiMode.displayName) mode",
           systemImage: aiMode == .off ? "waveform" : "sparkles"
@@ -616,31 +955,27 @@ struct ContentView: View {
 
         Spacer()
 
+        if note.photoCount > 0 {
+          Label("\(note.photoCount)", systemImage: "photo")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
         Text("\(note.wordCount) words")
           .font(.caption2)
           .foregroundStyle(.tertiary)
+          .padding(.trailing, 2)
+
+        noteShareMenu(for: note, tint: tint)
+        noteCopyButton(for: note, tint: tint)
+        noteDeleteButton(for: note)
       }
 
-      ScrollViewReader { proxy in
-        ScrollView {
-          Text(note.body)
-            .textSelection(.enabled)
-            .font(.body)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .id("noteBottom")
-        }
-        .frame(maxHeight: 320)
-        // Animate the proxy scroll so the newest content slides into view
-        // rather than jumping abruptly when an append lands.
-        .onChange(of: note.body) { _, _ in
-          withAnimation(.easeOut(duration: 0.4)) {
-            proxy.scrollTo("noteBottom", anchor: .bottom)
-          }
-        }
-        .onAppear {
-          proxy.scrollTo("noteBottom", anchor: .bottom)
+      VStack(alignment: .leading, spacing: 12) {
+        ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+          segmentView(seg, noteID: note.id)
         }
       }
+      .frame(maxWidth: .infinity, alignment: .leading)
     }
     .padding(16)
     .background(
@@ -653,35 +988,231 @@ struct ContentView: View {
     )
   }
 
-  private func actionButtons(for text: String) -> some View {
-    let shareTint: Color = aiMode == .off ? .blue : .purple
-
-    return HStack(spacing: 12) {
-      ShareLink(item: text) {
-        Label("Share", systemImage: "square.and.arrow.up")
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, 4)
+  @ViewBuilder
+  private func segmentView(_ seg: NoteSegment, noteID: UUID) -> some View {
+    switch seg {
+    case .text(let text):
+      NoteTextView(text: text, headingColor: .purple)
+        .textSelection(.enabled)
+    case .photo(let photoID):
+      VStack(alignment: .leading, spacing: 8) {
+        if let ui = PhotoStore.shared.loadImage(noteID: noteID, photoID: photoID) {
+          Image(uiImage: ui)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else {
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color.secondary.opacity(0.12))
+            .frame(height: 80)
+            .overlay(
+              Label("Missing photo", systemImage: "photo.badge.exclamationmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            )
+        }
+        analysisCard(noteID: noteID, photoID: photoID)
       }
-      .buttonStyle(.borderedProminent)
-      .tint(shareTint)
+    }
+  }
+
+  @ViewBuilder
+  private func analysisCard(noteID: UUID, photoID: UUID) -> some View {
+    let analyzing = notes.analyzingPhotoIDs.contains(photoID)
+    let analysis = notes.photoAnalyses[photoID]
+    let error = notes.analysisErrors[photoID]
+
+    if analyzing {
+      HStack(spacing: 8) {
+        ProgressView().controlSize(.small)
+        Text("Analyzing photo…")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      .padding(10)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 10).fill(Color.purple.opacity(0.06))
+      )
+    } else if let analysis {
+      VStack(alignment: .leading, spacing: 8) {
+        HStack(spacing: 6) {
+          Image(systemName: "sparkles")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.purple)
+          Text("AI Analysis")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.purple)
+          Spacer()
+        }
+
+        if !analysis.summary.isEmpty {
+          Text(analysis.summary)
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            .textSelection(.enabled)
+        }
+
+        if !analysis.keyDetails.isEmpty {
+          VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(analysis.keyDetails.enumerated()), id: \.offset) { _, detail in
+              HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("•").foregroundStyle(.purple)
+                Text(detail)
+                  .font(.footnote)
+                  .foregroundStyle(.secondary)
+                  .textSelection(.enabled)
+              }
+            }
+          }
+        }
+
+        if let transcribed = analysis.transcribedText, !transcribed.isEmpty {
+          DisclosureGroup {
+            Text(transcribed)
+              .font(.footnote.monospaced())
+              .foregroundStyle(.primary)
+              .textSelection(.enabled)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(.top, 4)
+          } label: {
+            Label("Transcribed text", systemImage: "text.viewfinder")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        }
+      }
+      .padding(10)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 10).fill(Color.purple.opacity(0.08))
+      )
+    } else if let error {
+      VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+          Image(systemName: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange)
+          Text(error)
+            .font(.caption)
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        HStack(spacing: 8) {
+          Button {
+            showingSettings = true
+          } label: {
+            Label("Open Settings", systemImage: "gearshape")
+              .font(.caption.weight(.semibold))
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .tint(.orange)
+
+          Button {
+            notes.analyzePhoto(noteID: noteID, photoID: photoID, provider: aiProvider)
+          } label: {
+            Label("Retry", systemImage: "arrow.clockwise")
+              .font(.caption.weight(.semibold))
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .tint(.orange)
+        }
+      }
+      .padding(10)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.1)))
+    }
+  }
+
+  /// Compact round icon button used in the note title row. Light tinted
+  /// background, tint-coloured glyph — mirrors the other circular pill
+  /// controls in the header/active-note strip.
+  private func circleIconButton(
+    systemName: String,
+    tint: Color,
+    accessibilityLabel: String,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Image(systemName: systemName)
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(tint)
+        .frame(width: 30, height: 30)
+        .background(Circle().fill(tint.opacity(0.14)))
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(accessibilityLabel)
+  }
+
+  private func noteShareMenu(for note: Note, tint: Color) -> some View {
+    let text = NoteContent.stripPhotos(from: note.body)
+    let hasPhotos = note.photoCount > 0
+
+    return Menu {
+      Button {
+        shareNoteText(note)
+      } label: {
+        Label("Share Text Only", systemImage: "text.alignleft")
+      }
+      .disabled(text.isEmpty)
 
       Button {
-        copyToClipboard(text)
+        sharePDF(note)
       } label: {
-        HStack(spacing: 6) {
-          Image(systemName: showCopied ? "checkmark.circle.fill" : "doc.on.doc")
-            .contentTransition(.symbolEffect(.replace))
-          Text(showCopied ? "Copied" : "Copy")
-            .contentTransition(.interpolate)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 4)
-        .foregroundStyle(showCopied ? Color.green : Color.primary)
+        Label(
+          hasPhotos ? "Share as PDF (text + photos)" : "Share as PDF",
+          systemImage: "doc.richtext"
+        )
       }
-      .buttonStyle(.bordered)
-      .tint(showCopied ? .green : .accentColor)
-      .animation(.easeInOut(duration: 0.2), value: showCopied)
+    } label: {
+      Image(systemName: "square.and.arrow.up")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(tint)
+        .frame(width: 30, height: 30)
+        .background(Circle().fill(tint.opacity(0.14)))
+        .contentShape(Circle())
     }
+    .disabled(isBuildingPDF)
+    .opacity(isBuildingPDF ? 0.5 : 1.0)
+    .accessibilityLabel("Share note")
+  }
+
+  private func noteDeleteButton(for note: Note) -> some View {
+    Button {
+      UISelectionFeedbackGenerator().selectionChanged()
+      pendingDeleteNoteID = note.id
+    } label: {
+      Image(systemName: "trash")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.red)
+        .frame(width: 30, height: 30)
+        .background(Circle().fill(Color.red.opacity(0.14)))
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel("Delete note")
+  }
+
+  private func noteCopyButton(for note: Note, tint: Color) -> some View {
+    let text = NoteContent.stripPhotos(from: note.body)
+    let effectiveTint: Color = showCopied ? .green : tint
+    return Button {
+      copyToClipboard(text)
+    } label: {
+      Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+        .contentTransition(.symbolEffect(.replace))
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(effectiveTint)
+        .frame(width: 30, height: 30)
+        .background(Circle().fill(effectiveTint.opacity(0.14)))
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .animation(.easeInOut(duration: 0.2), value: showCopied)
+    .accessibilityLabel(showCopied ? "Copied" : "Copy note text")
   }
 
   private func copyToClipboard(_ text: String) {
@@ -771,6 +1302,38 @@ private struct ModeChip: View {
     case .off: .blue
     default: .purple
     }
+  }
+}
+
+/// Mode chip for user-authored custom modes. Visually matches
+/// `ModeChip` (same capsule / tint / padding) so the two types read
+/// as one unified picker row.
+private struct CustomModeChip: View {
+  let mode: CustomAIMode
+  let isSelected: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 6) {
+        Image(systemName: mode.icon)
+          .font(.caption.weight(.semibold))
+        Text(mode.displayName)
+          .font(.subheadline.weight(.medium))
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 8)
+      .background(
+        Capsule()
+          .fill(isSelected ? Color.purple : Color.secondary.opacity(0.12))
+      )
+      .foregroundStyle(isSelected ? Color.white : Color.primary)
+      .overlay(
+        Capsule()
+          .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.2), lineWidth: 1)
+      )
+    }
+    .buttonStyle(.plain)
   }
 }
 

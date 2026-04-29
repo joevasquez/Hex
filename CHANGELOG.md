@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.8.7
+
+### Fixes
+
+- **macOS: paste reliably lands in the right app, every time.** The remaining unreliability — "sometimes my transcription shows up, sometimes I paste my previous clipboard" — traced to three compounding bugs:
+  1. The paste targeted *whichever app was frontmost when transcription finished*, not the app the user was dictating into. If you Cmd-Tabbed away while Whisper or AI post-processing was running (1–3 seconds), the paste landed in the wrong window.
+  2. The Accessibility-insertion path bypasses the clipboard entirely, so if AX landed in the wrong element and you tried to `Cmd+V` manually in your actual target, you pasted whatever was in the clipboard *before* Quill ran (API keys, etc.).
+  3. Nothing stopped a paste from writing into Quill's own Settings / History window.
+- **Fix:** Quill now remembers which app you started recording in and reactivates it before pasting (with a short settle-time for focus to update), refuses to paste into itself, and after every successful paste syncs the transcription into the clipboard — so manual `Cmd+V` fallback always gives you the dictation, never stale content.
+
+## 0.8.6
+
+### Fixes
+
+- **macOS: paste is now reliable** (follow-up to the 0.8.5 Accessibility switch).
+  - Some apps (certain Electron inputs, custom-drawn text fields) were accepting our AX insert call without actually applying it — the paste appeared to succeed but nothing showed up. The AX path now reads the element's value before and after the insert and falls through to the clipboard path if nothing changed.
+  - Accessibility permission is now checked **once** at the start of the paste flow. When it's missing, both the AX-insertion path and the Cmd+V injection path are known to silently fail, so Quill skips them and simply leaves the transcription in the clipboard with a clear log line ("Accessibility permission not granted — user must press Cmd+V manually"). No more disappearing dictations.
+  - The clipboard-restore step is also skipped when permission is missing, so your transcription stays in the clipboard instead of being overwritten by your previous contents after a failed auto-paste.
+
+## 0.8.5
+
+### Fixes
+
+- **macOS: never paste the wrong content.** A race in the clipboard-paste path could result in Quill pasting whatever you previously had in your clipboard (e.g. an API key) instead of your transcription when the target app was slow to process `Cmd+V`. Two changes make this foolproof:
+  1. The primary paste path is now **Accessibility-based text insertion** — Quill writes the transcription directly into the focused text field via `AXUIElementSetAttributeValue`, which never touches the clipboard. Works in all browsers, native AppKit apps, and most Electron apps.
+  2. When the fallback clipboard path does run, the default is now to **keep the transcription in the clipboard** rather than race to restore your previous clipboard. If you want the old behavior (restore previous clipboard), toggle "Copy to Clipboard" off in Settings — but that path no longer puts you at risk of pasting stale content, because it also bumps the restore delay to 3 s and verifies the clipboard wasn't stomped in the interim.
+
+## 0.8.4
+
+### Fixes
+
+- **AI modes no longer invent content.** The post-processor was adding greetings, closings, and signatures the speaker never dictated — e.g. `"Please suggest times for next week"` came back wrapped in a `Hi,` / `Best,\nJoe` template. Every mode is now strictly cleanup-only: grammar, punctuation, paragraphing, and (for Notes) bullet formatting. Greetings like `Hi Amanda,` and closings like `Best,` are only emitted when the speaker actually dictated them. Two explicit examples in the system prompt show what NOT to do.
+
+## 0.8.3
+
+### Fixes
+
+- **AI no longer answers questions in your dictation.** If you dictated "Do you have an interest in joining for an introduction call?", some modes would respond as the AI ("I am a text post-processor, I cannot join calls…") instead of just punctuating the question. The user message is now wrapped in `<transcript>` tags that the system prompt treats as data, with a concrete example showing that questions inside should be punctuated, not answered. As a safety net, obvious refusal responses ("I am a…", "I cannot…", "As an AI…") are detected and the raw transcript is used instead so no dictation is ever lost.
+- **Email mode no longer emits `<Your name>`.** The closing used to include a literal placeholder; it now ends at `Best,` and lets you type your own signature. Also stops emitting other angle-bracketed placeholders like `<recipient-name>` / `<subject>`.
+
+## 0.8.2
+
+### New
+
+- **Inline voice commands.** Phrases like `period`, `comma`, `question mark`, `colon`, `semicolon`, `new paragraph`, `new line`, and `full stop` are now converted to punctuation and line breaks *mid-sentence* — not only when spoken alone. So "hello comma world period new paragraph welcome" becomes `Hello, world.\n\nWelcome` before AI post-processing runs. Standalone `undo`, `redo`, and `select all` still trigger the corresponding editor commands. Toggleable under Settings → AI Enhancement → Voice Commands.
+
+### Fixes
+
+- **Paste reliability.** Fixed a race where releasing the record hotkey in a slow-to-respond app (Chrome, Arc, Slack, Electron apps, first paste after launch) could paste your *previous* clipboard contents instead of the transcription. The clipboard restore now waits 1.5 s instead of 500 ms and skips the restore entirely if anything else has written to the clipboard in the meantime.
+
+## 0.8.1
+
+### Fixes
+
+- **Menu bar icon restored.** The blank slot some users saw in the menu bar was caused by a reference to an SF Symbol (`feather`) that doesn't exist in Apple's catalog, so the label rendered nothing. The menu bar now uses the same white-feather asset as the app icon, drawn as a proper template `NSImage` so it auto-tints for light and dark menu bars.
+- Stop priming the sound-effects audio engine when sound effects are disabled so Quill avoids unnecessary background audio activity and sleep assertions (#200).
+
 ## 0.8.0 — Quill
 
 Quill is a rebrand of Hex under new stewardship — same on-device dictation, new name, and a meaningful new capability set.

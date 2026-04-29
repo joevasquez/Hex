@@ -53,25 +53,26 @@ enum KeychainKey {
 private struct KeychainClientLive {
   private let service = "com.joevasquez.Quill"
 
-  /// Build the base query dictionary. Uses the standard `[String: Any] as
-  /// CFDictionary` bridge — the Swift runtime wraps values in a toll-free
-  /// bridge that correctly retains them for the lifetime of the dictionary.
-  /// (An earlier version of this file used `CFDictionaryCreateMutable` with
-  /// `nil` retain callbacks to "avoid bridging edge cases"; that was the
-  /// wrong call — `nil` callbacks mean the dictionary does NOT retain its
-  /// values, so the `CFData` for `kSecValueData` was being deallocated
-  /// before `SecItemAdd` read it, which crashed inside `CFGetTypeID` with
-  /// a pointer-auth trap.)
-  private func baseQuery(account: String) -> [String: Any] {
+  /// Lookup attributes (class + service + account) used for read, delete,
+  /// and as the base for save. `kSecAttrAccessible` is *deliberately* NOT
+  /// included here: on iOS, passing it to `SecItemCopyMatching` can cause
+  /// the query to miss items that were saved with the same attribute
+  /// (the system doesn't always treat it as an equality filter). Keep
+  /// accessible as a save-only attribute.
+  ///
+  /// Uses the standard `[String: Any] as CFDictionary` bridge — the Swift
+  /// runtime wraps values in a toll-free bridge that correctly retains
+  /// them for the lifetime of the dictionary. (An earlier version of this
+  /// file used `CFDictionaryCreateMutable` with `nil` retain callbacks to
+  /// "avoid bridging edge cases"; that was the wrong call — `nil`
+  /// callbacks mean the dictionary does NOT retain its values, so the
+  /// `CFData` for `kSecValueData` was being deallocated before
+  /// `SecItemAdd` read it, which crashed inside `CFGetTypeID`.)
+  private func lookupQuery(account: String) -> [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,
       kSecAttrAccount as String: account,
-      // Required on iOS (sets the item's protection class); a safe hint on
-      // macOS. "WhenUnlockedThisDeviceOnly" = readable only while the device
-      // is unlocked, and never synced to iCloud or included in backups —
-      // appropriate for API keys.
-      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
     ]
   }
 
@@ -82,8 +83,13 @@ private struct KeychainClientLive {
     // Delete any existing item first so SecItemAdd doesn't collide.
     delete(key: key)
 
-    var query = baseQuery(account: key)
+    var query = lookupQuery(account: key)
     query[kSecValueData as String] = data
+    // Required on iOS (sets the item's protection class); a safe hint on
+    // macOS. "WhenUnlockedThisDeviceOnly" = readable only while the device
+    // is unlocked, and never synced to iCloud or included in backups —
+    // appropriate for API keys.
+    query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
 
     let status = SecItemAdd(query as CFDictionary, nil)
     guard status == errSecSuccess else {
@@ -94,7 +100,7 @@ private struct KeychainClientLive {
   func read(key: String) -> String? {
     guard !key.isEmpty else { return nil }
 
-    var query = baseQuery(account: key)
+    var query = lookupQuery(account: key)
     query[kSecReturnData as String] = kCFBooleanTrue
     query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -112,7 +118,7 @@ private struct KeychainClientLive {
 
   func delete(key: String) {
     guard !key.isEmpty else { return }
-    SecItemDelete(baseQuery(account: key) as CFDictionary)
+    SecItemDelete(lookupQuery(account: key) as CFDictionary)
   }
 }
 

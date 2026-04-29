@@ -131,6 +131,18 @@ struct SettingsFeature {
     case apiKeyLoaded(String)
     case setContextEnrichmentEnabled(Bool)
     case setLiveTranscriptEnabled(Bool)
+    case setInlineEditEnabled(Bool)
+    case addCustomAIMode(CustomAIMode)
+    case updateCustomAIMode(CustomAIMode)
+    case removeCustomAIMode(UUID)
+    /// Fired by the onboarding flow when the user finishes (or skips
+    /// through to) the last step. Persists `hasCompletedOnboarding`
+    /// so we don't re-present the welcome tour.
+    case markOnboardingComplete
+    /// Reset `hasCompletedOnboarding` so the welcome tour appears
+    /// again on the next launch / window open. Triggered by the
+    /// "Replay Tutorial" entry in Settings → General.
+    case replayOnboarding
   }
 
   @Dependency(\.keyEventMonitor) var keyEventMonitor
@@ -683,6 +695,35 @@ struct SettingsFeature {
 
       case let .setLiveTranscriptEnabled(enabled):
         state.$hexSettings.withLock { $0.liveTranscriptEnabled = enabled }
+        return .none
+
+      case let .setInlineEditEnabled(enabled):
+        state.$hexSettings.withLock { $0.inlineEditEnabled = enabled }
+        return .none
+
+      case let .addCustomAIMode(mode):
+        state.$hexSettings.withLock { $0.customAIModes.append(mode) }
+        return .none
+
+      case let .updateCustomAIMode(mode):
+        state.$hexSettings.withLock {
+          guard let idx = $0.customAIModes.firstIndex(where: { $0.id == mode.id }) else { return }
+          $0.customAIModes[idx] = mode
+        }
+        return .none
+
+      case let .removeCustomAIMode(id):
+        state.$hexSettings.withLock {
+          $0.customAIModes.removeAll { $0.id == id }
+        }
+        return .none
+
+      case .markOnboardingComplete:
+        state.$hexSettings.withLock { $0.hasCompletedOnboarding = true }
+        return .none
+
+      case .replayOnboarding:
+        state.$hexSettings.withLock { $0.hasCompletedOnboarding = false }
         return .none
 
       }

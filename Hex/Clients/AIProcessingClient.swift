@@ -15,19 +15,32 @@ private let aiLogger = HexLog.aiProcessing
 
 @DependencyClient
 struct AIProcessingClient {
-  var process: @Sendable (String, AIProcessingMode, AIProvider, AppContext?) async throws -> String
+  /// Process `text` with the LLM.
+  ///
+  /// The last parameter is an optional override for the system prompt.
+  /// When non-nil it replaces `mode.systemPrompt` — that's how user-
+  /// authored custom AI modes flow through this pipeline without
+  /// needing a parallel code path. When nil, the built-in mode's
+  /// prompt is used as before. AppContext enrichment still applies
+  /// on top of whichever prompt is chosen.
+  var process: @Sendable (String, AIProcessingMode, AIProvider, AppContext?, String?) async throws -> String
 }
 
 extension AIProcessingClient: DependencyKey {
   static var liveValue: Self {
     .init(
-      process: { text, mode, provider, context in
-        guard mode != .off else { return text }
+      process: { text, mode, provider, context, customSystemPrompt in
+        // customSystemPrompt wins; when nil we use the built-in
+        // mode's prompt. If both resolve to empty (mode == .off and
+        // no custom prompt provided), skip the LLM entirely.
+        let basePrompt = customSystemPrompt ?? mode.systemPrompt
+        guard !basePrompt.isEmpty else { return text }
 
         @Dependency(\.keychain) var keychain
 
-        let enrichedPrompt = buildPrompt(mode: mode, context: context)
+        let enrichedPrompt = buildPrompt(basePrompt: basePrompt, context: context)
 
+        let response: String
         switch provider {
         case .openAI:
           guard let apiKey = await keychain.read(KeychainKey.openAIAPIKey),
@@ -36,7 +49,7 @@ extension AIProcessingClient: DependencyKey {
             aiLogger.warning("OpenAI API key not configured; skipping AI processing")
             return text
           }
-          return try await callOpenAI(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
+          response = try await callOpenAI(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
 
         case .anthropic:
           guard let apiKey = await keychain.read(KeychainKey.anthropicAPIKey),
@@ -45,15 +58,28 @@ extension AIProcessingClient: DependencyKey {
             aiLogger.warning("Anthropic API key not configured; skipping AI processing")
             return text
           }
-          return try await callAnthropic(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
+          response = try await callAnthropic(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
         }
+
+        // Safety net: if the model still treated the transcript as a
+        // conversation (e.g. answered a question instead of
+        // punctuating it), fall back to the raw transcript so the
+        // user's dictation is never replaced by a refusal.
+        if TranscriptRefusalDetector.isRefusal(response) {
+          aiLogger.warning(
+            "AI response looks like a refusal; falling back to raw transcript. Response: \(response, privacy: .private)"
+          )
+          return text
+        }
+
+        return response
       }
     )
   }
 }
 
-private func buildPrompt(mode: AIProcessingMode, context: AppContext?) -> String {
-  var prompt = mode.systemPrompt
+private func buildPrompt(basePrompt: String, context: AppContext?) -> String {
+  var prompt = basePrompt
   if let context, let fragment = context.promptFragment() {
     let appName = context.appName ?? "the active app"
     prompt += "\n\nContext from \(appName):\n\"\(fragment)\"\n\nUse this context to improve formatting, tone, and terminology."
@@ -78,11 +104,18 @@ private func callOpenAI(text: String, systemPrompt: String, apiKey: String) asyn
   request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
   request.timeoutInterval = 15
 
+  // Wrap the user message in <transcript> tags that the system prompt
+  // tells the model to treat as DATA rather than a conversation —
+  // critical for preventing the model from answering questions that
+  // appear in the transcript ("do you want to join this call?" → the
+  // model responding as itself instead of just punctuating).
+  let userMessage = TranscriptWrapper.wrap(text)
+
   let body: [String: Any] = [
     "model": AIProvider.openAI.defaultModel,
     "messages": [
       ["role": "system", "content": systemPrompt],
-      ["role": "user", "content": text],
+      ["role": "user", "content": userMessage],
     ],
     "temperature": 0.3,
     "max_tokens": 2048,
@@ -129,11 +162,13 @@ private func callAnthropic(text: String, systemPrompt: String, apiKey: String) a
   request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
   request.timeoutInterval = 15
 
+  let userMessage = TranscriptWrapper.wrap(text)
+
   let body: [String: Any] = [
     "model": AIProvider.anthropic.defaultModel,
     "system": systemPrompt,
     "messages": [
-      ["role": "user", "content": text],
+      ["role": "user", "content": userMessage],
     ],
     "max_tokens": 2048,
   ]

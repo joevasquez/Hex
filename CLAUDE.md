@@ -75,6 +75,27 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 
 6. **Logging**: All diagnostics should use the unified logging helper `HexLog` (`HexCore/Sources/HexCore/Logging.swift`). Pick an existing category (e.g., `.transcription`, `.recording`, `.settings`) or add a new case so Console predicates stay consistent. Avoid `print` and prefer privacy annotations (`, privacy: .private`) for anything potentially sensitive like transcript text or file paths.
 
+7. **Paste reliability (macOS)**: `PasteboardClient.paste(text:sourceAppBundleID:)` takes the bundle ID captured at record-start so we can reactivate the user's original target app before pasting (AppKit's front-app state has usually drifted 1–3 s later after Whisper + AI finish). Order of attempts: (a) reactivate source app, wait 120 ms for focus to settle; (b) refuse to paste if we're still frontmost (don't write into Quill's own Settings); (c) Accessibility `AXUIElementSetAttributeValue(kAXSelectedTextAttribute)` with before/after value verification — silent "success" from apps that accept but drop the write is caught and falls through; (d) clipboard + `Cmd+V` via CGEvent; (e) always sync the transcription into the clipboard post-paste so any user-initiated `Cmd+V` recovery still delivers the dictation. Both AX insertion and CGEvent injection require `AXIsProcessTrusted()` — we check once upfront and skip paths that would silently fail when permission is missing.
+
+8. **Cross-platform AI modes architecture**:
+   - `HexCore/Models/AIProcessingMode.swift` holds the built-in modes (off / clean / email / notes / message / code) plus the safety preamble (public) used by inline edit + custom modes.
+   - `HexCore/Models/CustomAIMode.swift` defines user-authored modes (`name`, `systemPrompt`, `icon`) and `AIModeSelection` — a wrapper supporting both built-ins and `custom:<uuid>`. `CustomAIMode.fullSystemPrompt` wraps the user prompt in the shared preamble.
+   - macOS persists custom modes in `HexSettings.customAIModes`; iOS via `@AppStorage(CustomAIModesStorage.userDefaultsKey)` (JSON-encoded `[CustomAIMode]`).
+   - Both AI clients (`AIProcessingClient` on macOS, `TextAIClient` on iOS) accept an optional `customSystemPrompt` override — call sites resolve the prompt from the current selection and pass it through.
+   - User messages are wrapped in `<transcript>…</transcript>` tags by `TranscriptWrapper`; `TranscriptRefusalDetector` catches "I am a post-processor"-style refusals and falls back to the raw transcript so the user's dictation is never replaced by an assistant-style reply.
+
+9. **Inline Edit (macOS)**: Active in Edit mode (HUD pill cycle) or when `hexSettings.inlineEditEnabled` is on. The user highlights text in any app, holds the hotkey, speaks an instruction ("tighten 20%", "translate to Spanish"), and releases. The pipeline: record → transcribe → send instruction + selection to LLM (`InlineEditPrompt.systemPrompt`) → replace selection via AX → show Accept/Undo pill on the HUD. Falls back to normal paste if AX replacement fails.
+
+   **Critical architecture note — selection capture timing:** Selection capture (`InlineEditClient.captureSelectionSync`) happens in `handleStopRecording`, NOT `handleStartRecording`. This is intentional. AX calls in the reducer at recording-start blocked/interfered with the recording effect chain in TCA, causing Edit mode to silently fail to record. Moving capture to stop time works because the HUD is a non-activating `NSPanel`, so the source app is still frontmost with text highlighted when the user releases the hotkey. If AX fails (common in Chrome/Electron), a clipboard fallback (Cmd+C simulation via CGEvent) runs in parallel with transcription (~150ms vs ~1-3s).
+
+   **Selection capture strategy (two-tier):**
+   - **Tier 1 — AX sync** (`captureSelectionSync`): reads `kAXSelectedTextAttribute` from the focused element. Fast, no side effects. Works in native AppKit apps and most Cocoa text views.
+   - **Tier 2 — Clipboard fallback** (`captureSelectionViaClipboard`): simulates Cmd+C, reads pasteboard, restores original clipboard. Works in Chrome, Electron (Slack, VS Code, Discord), and apps with non-standard text controls. Same approach as Raycast/Rewind.
+
+10. **Integrations surface (frontend-only)**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections. Settings UIs (`IntegrationsSectionView` on macOS, `IntegrationsView` on iOS) show "Coming Soon" on Connect — send adapters per integration land in a follow-up.
+
+11. **Auto-titles (iOS)**: New notes are created with empty `title` + `isAutoTitle = true`. `displayTitle` falls back to `Note.derivedTitle` until `NotesStore.generateTitleIfNeeded(noteID:provider:)` swaps in an LLM-generated 3–6 word title via `TextAIClient.generateTitle(for:provider:)`. Flipping `isAutoTitle = false` (either by the AI landing OR the user calling `renameNote`) locks the title so subsequent appends don't re-title. Legacy notes persisted before this field decode as `isAutoTitle = false` so their derived titles are preserved.
+
 ## Models (2025‑11)
 
 - Default: Parakeet TDT v3 (multilingual) via FluidAudio
@@ -134,24 +155,65 @@ The iOS app lives in the `Quill iOS/` folder (note: folder name has a space — 
 ### Scope
 
 - On-device transcription via WhisperKit (Core ML). No FluidAudio / Parakeet on iOS yet.
-- Optional AI post-processing using the shared `AIProcessingClient` from `HexCore` (OpenAI or Anthropic).
-- API keys stored in the iOS Keychain via the shared cross-platform `KeychainClient`.
-- No hotkeys, no auto-paste, no menu bar. User taps a button → speaks → gets text → shares/copies.
+- AI post-processing of transcripts via `TextAIClient` (Anthropic or OpenAI).
+- Local note store with inline photos; photos are analyzed by a vision model (`PhotoAnalysisClient`).
+- PDF export of a note (text + inline photos + AI analyses).
+- Editable note titles, share menu (text-only or PDF), location-tagged note creation.
+- API keys stored via `KeychainStore` (direct Security-framework calls; see the keychain note below).
+- No hotkeys, no auto-paste, no menu bar. Tap feather mic/camera → speak/snap → get structured note → share/export.
 
 ### Structure
 
 - `QuilliOSApp.swift` — `@main` entry point.
-- `ContentView.swift` — main screen: record button, status, result area with raw + AI-enhanced transcript.
-- `SettingsView.swift` — sheet with model selector, AI toggle/mode/provider, API key field.
-- `QuillIOSSettings.swift` — `@AppStorage` keys and defaults (lives in `UserDefaults`, not `HexSettings`).
-- `Clients/IOSRecordingClient.swift` — `AVAudioRecorder` wrapper with metering and permission handling (iOS equivalent of the macOS `RecordingClient`).
+- `ContentView.swift` — main screen. Purple header with feather logo + list/new/gear buttons, active-note strip (tap title to rename), mode chip row, note canvas with inline photos + AI-analysis cards, floating mic + camera FAB cluster at bottom-right, status pill above it.
+- `SettingsView.swift` — sheet with Whisper model selector, AI provider picker, API key field.
+- `NotesListView.swift` — sheet listing all saved notes with rename/delete.
+- `QuillIOSSettings.swift` — `@AppStorage` keys and defaults.
+- `PhotoPicker.swift` — `PHPickerViewController` (library) and `UIImagePickerController` (camera) wrappers.
+- `ShareSheet.swift` — `UIActivityViewController` wrapper driven by `ShareRequest` (Identifiable items wrapper).
+- `NotePDFExporter.swift` — `ImageRenderer` → `CGContext` PDF of a note, including photo-analysis blocks.
+- `Models/Note.swift` — `id`, `title`, `body` (flat string with inline photo tokens), timestamps, optional `location`. `wordCount` and `displayTitle` strip photo tokens before computing.
+- `Models/NoteContent.swift` — tokenizer. Photos embed as `![photo](<uuid>)` in `body`. `segments(from:)` splits into `.text` / `.photo` segments for rendering; `stripPhotos(from:)` for share/copy/preview.
+- `Models/PhotoAnalysis.swift` — Codable sidecar (`summary`, `keyDetails[]`, optional `transcribedText`, `analyzedAt`, `model`).
+- `Clients/IOSRecordingClient.swift` — `AVAudioRecorder` wrapper with metering and permission handling.
+- `Clients/NotesStore.swift` — JSON-persisted `[Note]` + active-note ID in UserDefaults. Also owns published `photoAnalyses: [UUID: PhotoAnalysis]`, `analyzingPhotoIDs`, `analysisErrors`. Loads analyses from disk on init so views refresh automatically.
+- `Clients/PhotoStore.swift` — persists `Application Support/photos/<note-id>/<photo-id>.jpg` and sidecar `<photo-id>.json`. Downscales to 1568 px long edge at JPEG 0.75 with `UIGraphicsImageRendererFormat.scale = 1` (forcing scale-1 is critical — the default uses the screen scale and re-inflates the image).
+- `Clients/PhotoAnalysisClient.swift` — ships a JPEG to Anthropic or OpenAI with a JSON-only system prompt, parses the structured response. Recompresses on the fly (`compressForVision`) if the on-disk image is over 4 MB (Anthropic caps at 5 MB).
+- `Clients/TextAIClient.swift` — iOS-specific text post-processor. Mirrors the shared macOS `AIProcessingClient` but reads the API key via `KeychainStore` and logs per-call so "AI didn't run" failures are visible.
+- `Clients/KeychainStore.swift` — direct Security-framework helpers (`SecItemAdd` / `SecItemCopyMatching`). See the keychain note below for why this exists.
+- `Clients/LocationClient.swift` — one-shot best-effort reverse geocode used when a note is created.
+- `CustomModesView.swift` — Settings sub-screen for managing user-authored AI modes. Persists via `@AppStorage` under `CustomAIModesStorage.userDefaultsKey`. Modes surface as chips in the main screen's mode row (see `CustomModeChip` in ContentView).
+- `IntegrationsView.swift` — Settings sub-screen listing the integrations catalog (`HexCore/Models/Integration.swift`). Frontend-only; connection state persisted via `IntegrationConnectionStore` in UserDefaults. Free tier capped at `IntegrationLimits.freeTierMaxConnections = 2`.
+- `QuillDeepLinkRouter.swift` — `@MainActor ObservableObject` that parses incoming `quill://` URLs (from the widget) into a `QuillDeepLink` enum. `ContentView` observes `pendingLink` and routes: `.record` starts a new note + recording, `.notes` shows the notes list.
+
+### Widget (iOS home-screen)
+
+The widget extension lives in `QuillWidget/` as a separate target (`QuillWidgetExtension`), **NOT** in `Quill iOS/`. Created through Xcode's `File → New → Target → Widget Extension` flow; the resulting `PBXNativeTarget` / sync group / exception set / embed build phase are all in `project.pbxproj`.
+
+- `QuillWidget/QuillWidgetBundle.swift` — `@main WidgetBundle` entry.
+- `QuillWidget/QuillWidget.swift` — small + medium widget families. Small = feather + "Quill" + "Dictate" CTA. Medium = same on the left, latest-note card on the right. Both use a purple gradient `containerBackground`. The feather is drawn as a SwiftUI `FeatherShape: Shape` (filled vector path), not the PNG asset — the PNG is a thin outline that collapses to an illegible stroke at widget icon sizes.
+- `QuillWidget/Assets.xcassets/` — standard widget assets. The sync group includes a `PBXFileSystemSynchronizedBuildFileExceptionSet` excluding `Info.plist` from the target's Copy Bundle Resources phase (otherwise it collides with `INFOPLIST_FILE` → `QuillWidget/Info.plist`).
+- `HexCore/Models/QuillWidgetSnapshot.swift` — tiny Codable blob (title + preview + updatedAt) written by the main app into App Group `group.com.joevasquez.Quill` UserDefaults. Both targets need the **App Groups** capability with this group in their `*.entitlements`.
+- Deep links: tapping the small family or the left half of the medium family opens `quill://record` → `ContentView` starts a **new** note + begins recording. Tapping the right half of the medium family opens `quill://notes` → presents the notes list.
+- `NotesStore.updateWidgetSnapshot()` fires on every `save()` and calls `WidgetCenter.shared.reloadAllTimelines()`.
+
+### Keychain (iOS)
+
+The shared `KeychainClient` (in `Hex/Clients/`) uses `@DependencyClient`, which is unreliable on the iOS target under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`: `save(...)` returned success but nothing was actually persisted, and subsequent reads returned `errSecItemNotFound (-25300)`. **Do not use `KeychainClient.liveValue.save/read` on iOS.** Use `KeychainStore` in `Quill iOS/Clients/` for all keychain access from the iOS app. `KeychainStore` also splits save vs. lookup queries — `kSecAttrAccessible` is applied only on save (it is not a reliable filter on `SecItemCopyMatching`).
+
+### Photo flow
+
+1. Tap camera FAB → confirmation dialog (Take Photo / Choose from Library).
+2. If recording, the dialog first stops recording so the dictated text is committed before the photo lands.
+3. `NotesStore.insertPhotoIntoActiveNote(_:locationIfCreating:)` saves the JPEG and appends a `![photo](<uuid>)` token to the active note's `body`.
+4. `analyzePhoto(noteID:photoID:provider:)` fires in the background — writes a `<photo-id>.json` sidecar and updates `photoAnalyses`. Views refresh automatically.
 
 ### Shared Code via `HexCore`
 
 The iOS target imports `HexCore` for:
-- `AIProcessingMode`, `AIProvider`, `AIProcessingClient` (LLM post-processing).
-- `KeychainClient` (cross-platform wrapper around Security.framework; uses `CFDictionary` queries to avoid Swift bridging issues on iOS).
-- `KeychainKey.openAIAPIKey` / `.anthropicAPIKey` constants.
+- `AIProcessingMode`, `AIProvider` (enums used by `TextAIClient` / `PhotoAnalysisClient`).
+
+`Hex/Clients/KeychainClient.swift` is still included (via the iOS-target file-system-synchronized group exceptions) because `KeychainKey.openAIAPIKey` / `.anthropicAPIKey` constants live there, but iOS code should not call `KeychainClient.liveValue` methods — use `KeychainStore` instead.
 
 macOS-only clients (`SleepManagementClient`, `PermissionClient`) have iOS stub `liveValue`s so `HexCore` compiles for both platforms.
 
@@ -159,17 +221,49 @@ macOS-only clients (`SleepManagementClient`, `PermissionClient`) have iOS stub `
 
 iOS uses `@AppStorage` with plain `UserDefaults` keys (namespaced as `quill.*`), **not** the macOS `HexSettings` struct. Keep the two in sync manually if adding shared settings.
 
-Defaults: model = `openai_whisper-tiny.en`, mode = `clean`, provider = `anthropic`, AI disabled.
+Defaults: model = `openai_whisper-tiny.en`, mode = `off`, provider = `anthropic`.
 
 ### Permissions
 
-Microphone access is requested via `AVAudioApplication.requestRecordPermission`. The prompt string comes from `NSMicrophoneUsageDescription` in `Quill iOS/Info.plist`.
+`Quill iOS/Info.plist` declares:
+- `NSMicrophoneUsageDescription` — recording.
+- `NSSpeechRecognitionUsageDescription` — live partial transcript while recording.
+- `NSCameraUsageDescription` — in-note photos.
+- `NSPhotoLibraryUsageDescription` — library-sourced photos.
+- `NSLocationWhenInUseUsageDescription` — optional, tags new notes with a rough place name.
+
+### Xcode project
+
+The iOS target is a `PBXFileSystemSynchronizedRootGroup` — new files in `Quill iOS/` are auto-included, no `pbxproj` edits needed. Shared files from `Hex/Clients/` are pulled into the iOS target via an explicit `membershipExceptions` list in `project.pbxproj`. Xcode occasionally normalizes bundle-ID quoting in the `pbxproj` on build; revert those with `git checkout -- Hex.xcodeproj/project.pbxproj` to keep diffs clean.
+
+## Lessons Learned (for agents)
+
+1. **Never do AX work in `handleStartRecording`.** macOS Accessibility queries (`AXUIElementCopyAttributeValue`) can block, time out (0.5s per call), or silently corrupt the TCA effect chain when called synchronously inside the reducer at recording-start. This caused Edit mode to fail to record while Dictate/Action worked fine — same `beginRecording()` call, but the AX calls before it poisoned the path. The fix: defer all AX/clipboard work to `handleStopRecording`, where it can't block the recording effect.
+
+2. **`@DependencyClient` macro name collisions.** The TCA `@DependencyClient` macro generates underscore-prefixed backing stores for each property (e.g., `_captureSelectionViaClipboard`). If you define a free function with that same underscore-prefixed name, the compiler silently picks the wrong one. Name helper functions distinctly (e.g., `clipboardFallbackCapture()` instead of `_captureSelectionViaClipboard()`).
+
+3. **Race conditions with async clipboard fallback + hotkey release.** If recording start is deferred behind an `async` clipboard capture (~150ms), the user can release the hotkey during that window. `isRecording` is still `false`, so the release is ignored. Recording then starts with no future release event to stop it. Fix: always start recording synchronously first, run fallback captures in parallel.
+
+4. **Non-activating panels preserve focus.** `HUDPanel` is `NSPanel` with `.nonactivatingPanel` — it doesn't steal focus from the source app. This is why selection capture at stop-time works: the source app is still frontmost with text highlighted.
+
+## Enhancement Opportunities
+
+1. **Action mode**: The third HUD mode (Dictate → Edit → Action) is wired in the UI but has no distinct behavior — it currently acts like Dictate. Could be used for agentic actions (create task, send message, set reminder) triggered by voice commands.
+
+2. **Streaming transcription**: Live partial transcripts are disabled (single-model lock stalls the event tap). Re-enabling with a dedicated lightweight model or WhisperKit streaming API would give real-time feedback during recording.
+
+3. **Edit mode "no selection" UX**: When both AX and clipboard fallback fail to capture a selection, the dictation falls through to normal paste. Could show a transient HUD banner ("No text selected — pasted as dictation") so the user understands why their edit instruction wasn't applied.
+
+4. **Per-app AX skip list**: Some apps (Chrome, Electron) never respond to `kAXSelectedTextAttribute`. Could maintain a bundle-ID skip list to go straight to clipboard fallback, saving the AX timeout.
+
+5. **Edit mode undo stack**: Currently tracks one pending edit (Accept/Undo pill). Could support multi-level undo for consecutive edits to the same selection.
 
 ## Troubleshooting
 
 - Repeated mic prompts during debug: ensure Debug signing uses "Apple Development" so TCC sticks
 - Sandbox network errors (‑1003): add `com.apple.security.network.client = true` (already set)
 - Parakeet not detected: ensure it resides under the container path above; downloading from Hex places it correctly.
+- **Edit mode not recording**: If Edit mode silently fails to record while Dictate works, check that `handleStartRecording` does NOT call any AX functions. All selection capture must happen in `handleStopRecording`. See "Lessons Learned" above.
 
 ## Changelog Workflow Expectations
 

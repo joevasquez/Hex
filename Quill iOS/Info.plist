@@ -18,14 +18,31 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.joevasquez.Quill.iOS</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>quill</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>15</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Quill uses the camera so you can take a photo and attach it inline to your note — e.g. snapping a slide at a talk between dictations.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Quill tags each new note with your rough location (neighborhood) so you can remember where a thought started. Optional — decline to record notes without a location.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Quill needs microphone access to transcribe your voice notes.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Quill lets you attach photos from your library inline to a note, alongside your transcribed text.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Quill uses live speech recognition to show your words as you speak. The final transcript is produced on-device by Whisper.</string>
 	<key>UIApplicationSceneManifest</key>

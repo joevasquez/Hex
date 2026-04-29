@@ -6,7 +6,7 @@ private let appLogger = HexLog.app
 private let cacheLogger = HexLog.caches
 
 class HexAppDelegate: NSObject, NSApplicationDelegate {
-	var invisibleWindow: InvisibleWindow?
+	var hudPanel: HUDPanel?
 	var settingsWindow: NSWindow?
 	var statusItem: NSStatusItem!
 	private var launchedAtLogin = false
@@ -91,14 +91,14 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
     }
 
 	func presentMainView() {
-		guard invisibleWindow == nil else {
-			return
-		}
-		let transcriptionStore = HexApp.appStore.scope(state: \.transcription, action: \.transcription)
-		let transcriptionView = TranscriptionView(store: transcriptionStore).padding().padding(.top).padding(.top)
-			.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-		invisibleWindow = InvisibleWindow.fromView(transcriptionView)
-		invisibleWindow?.makeKeyAndOrderFront(nil)
+		guard hudPanel == nil else { return }
+		let transcriptionStore = HexApp.appStore.scope(
+			state: \.transcription,
+			action: \.transcription
+		)
+		let hudView = TranscriptionView(store: transcriptionStore)
+		hudPanel = HUDPanel.hosting(hudView)
+		hudPanel?.orderFrontRegardless()
 	}
 
 	func presentSettingsView() {

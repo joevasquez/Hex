@@ -17,7 +17,16 @@ private let pasteboardLogger = HexLog.pasteboard
 
 @DependencyClient
 struct PasteboardClient {
-    var paste: @Sendable (String) async -> Void
+    /// Paste `text` into the user's target application.
+    ///
+    /// `sourceAppBundleID` is the bundle identifier of the app that was
+    /// frontmost when the user started recording — captured in
+    /// `TranscriptionFeature.startRecording`. If provided, the paste
+    /// flow re-activates that app and waits briefly for focus to
+    /// settle before inserting text, so pastes reliably land in the
+    /// user's intended app even when they've Cmd-Tabbed to a different
+    /// window while Whisper / AI post-processing was running.
+    var paste: @Sendable (String, String?) async -> Void
     var copy: @Sendable (String) async -> Void
     var sendKeyboardCommand: @Sendable (KeyboardCommand) async -> Void
 }
@@ -26,8 +35,8 @@ extension PasteboardClient: DependencyKey {
     static var liveValue: Self {
         let live = PasteboardClientLive()
         return .init(
-            paste: { text in
-                await live.paste(text: text)
+            paste: { text, sourceAppBundleID in
+                await live.paste(text: text, sourceAppBundleID: sourceAppBundleID)
             },
             copy: { text in
                 await live.copy(text: text)
@@ -81,12 +90,107 @@ struct PasteboardClientLive {
     }
 
     @MainActor
-    func paste(text: String) async {
+    func paste(text: String, sourceAppBundleID: String?) async {
+        // Before doing anything, bring the user's intended target app
+        // back to front. Without this, a paste that lands 1-3s after
+        // the hotkey release (Whisper + AI post-processing take time)
+        // goes to whichever app the user Cmd-Tabbed to during the
+        // wait — not the app they were dictating into. See the file's
+        // `reactivateSourceApp` for the full rationale.
+        await reactivateSourceApp(bundleID: sourceAppBundleID)
+
+        // Hard refuse to paste into Quill itself. If the user has our
+        // Settings / History / menu bar popover frontmost when the
+        // paste fires, we'd write the transcription into one of our
+        // own text fields instead of the intended app. Both the AX
+        // path and the Cmd+V path will happily do this if we don't
+        // guard against it — and the result is the transcription
+        // silently vanishing from the user's perspective.
+        let ourBundleID = Bundle.main.bundleIdentifier ?? ""
+        if let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           frontBundle == ourBundleID {
+            pasteboardLogger.warning(
+                "Frontmost app is Quill itself; refusing to paste into ourselves. Leaving transcription in the clipboard."
+            )
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            return
+        }
+
         if hexSettings.useClipboardPaste {
             await pasteWithClipboard(text)
         } else {
             simulateTypingWithAppleScript(text)
         }
+
+        // After either path, make sure the clipboard contains the
+        // transcription — not whatever the user had copied before.
+        // Rationale: if our AX insertion landed in the wrong element
+        // (or a silent failure we couldn't detect), the user will
+        // naturally try Cmd+V in the real target app. That manual
+        // paste must deliver the transcription, never a previously
+        // copied API key, password, or unrelated text. Also, if the
+        // user explicitly wants Quill to keep the transcription in
+        // their clipboard (the default since 0.8.5), this is exactly
+        // what they asked for.
+        //
+        // We only skip this if the user has explicitly opted to
+        // restore the previous clipboard (`copyToClipboard = false`)
+        // AND we went down the clipboard path — in that case the
+        // existing 3 s restore timer owns the clipboard lifecycle.
+        if hexSettings.copyToClipboard {
+            let pb = NSPasteboard.general
+            if pb.string(forType: .string) != text {
+                pb.clearContents()
+                pb.setString(text, forType: .string)
+                pasteboardLogger.debug("Synced clipboard to transcription (post-paste safety)")
+            }
+        }
+    }
+
+    /// Bring the user's recording-time target app back to front so
+    /// that both the Accessibility-focused-element query and the
+    /// injected Cmd+V land in the intended app, not whichever window
+    /// the user happened to have focused when the transcription
+    /// finished. Especially important on slow-to-finish paths
+    /// (long recordings + AI post-processing) where the user is very
+    /// likely to have switched contexts during the wait.
+    @MainActor
+    private func reactivateSourceApp(bundleID: String?) async {
+        guard let bundleID, !bundleID.isEmpty else {
+            pasteboardLogger.debug("No source app bundle ID; skipping reactivation")
+            return
+        }
+        // If we are the frontmost app (e.g. the user was recording
+        // *into* Quill, or Settings is open), don't reactivate — any
+        // paste should go to whatever is front. The Quill-refuse
+        // guard above handles the pathological case.
+        if bundleID == Bundle.main.bundleIdentifier { return }
+
+        let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleID
+        )
+        guard let app = running.first else {
+            pasteboardLogger.info("Source app \(bundleID) no longer running; pasting into whatever is front")
+            return
+        }
+
+        // Already frontmost? Still nudge focus + short wait — this
+        // covers the case where the user Cmd-Tabbed away and back
+        // rapidly, leaving the window layer technically right but the
+        // focused-element AX state stale.
+        let alreadyFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
+        if !alreadyFront {
+            app.activate(options: [.activateIgnoringOtherApps])
+            pasteboardLogger.debug("Reactivated source app \(bundleID)")
+        }
+
+        // Wait for focus to settle. 120ms is a lot longer than it
+        // looks — it's what reliably works for Arc, Chrome, VS Code,
+        // Slack, Notion, and native AppKit on an M-series Mac. Less
+        // than ~80ms and AX frequently reads the stale focused
+        // element.
+        try? await Task.sleep(for: .milliseconds(120))
     }
     
     @MainActor
@@ -202,34 +306,84 @@ struct PasteboardClientLive {
 
     @MainActor
     func pasteWithClipboard(_ text: String) async {
+        // Check Accessibility permission once. Both the AX-insertion
+        // path AND the Cmd+V injection path require it (CGEvent.post
+        // silently fails without AX trust). If denied, we can still
+        // write to the clipboard so the user can paste manually, but
+        // we log a clear warning so the source of "nothing happened"
+        // shows up in the logs.
+        let hasAXPermission = AXIsProcessTrusted()
+
+        if !hasAXPermission {
+            pasteboardLogger.warning(
+                "Accessibility permission not granted — auto-paste will not work. Text will be written to the clipboard as a fallback; user must press Cmd+V manually."
+            )
+        }
+
+        // Path 1: Accessibility text insertion — NO CLIPBOARD INVOLVED.
+        //
+        // Write the text directly into the focused text field via
+        // `AXUIElementSetAttributeValue` and verify it actually
+        // landed by reading the element's value back. Skipped when
+        // permission is missing. On success the clipboard is never
+        // touched — no race against the target app's paste handler,
+        // no risk of pasting whatever was previously copied.
+        if hasAXPermission,
+           (try? Self.insertTextAtCursor(text)) != nil {
+            pasteboardLogger.debug("Pasted via Accessibility (verified, clipboard untouched)")
+            return
+        }
+
+        if hasAXPermission {
+            pasteboardLogger.info(
+                "Accessibility paste failed or didn't verify; falling back to clipboard + Cmd+V"
+            )
+        }
+
+        // Path 2: Clipboard + Cmd+V fallback.
+        //
+        // Write the transcription to the clipboard, then (if AX is
+        // granted) fire Cmd+V. If AX is denied, Cmd+V won't fire —
+        // but the text is in the clipboard so the user can paste it
+        // manually and no dictation is lost.
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
         let targetChangeCount = writeAndTrackChangeCount(pasteboard: pasteboard, text: text)
         _ = await waitForPasteboardCommit(targetChangeCount: targetChangeCount)
-        let pasteSucceeded = await performPaste(text)
-        
-        // Only restore original pasteboard contents if:
-        // 1. Copying to clipboard is disabled AND
-        // 2. The paste operation succeeded
-        if !hexSettings.copyToClipboard && pasteSucceeded {
+
+        if hasAXPermission {
+            _ = await postCmdV(delayMs: 0)
+        } else {
+            pasteboardLogger.notice(
+                "Cmd+V injection skipped (no Accessibility permission). Transcription left in the clipboard."
+            )
+        }
+
+        // Restore only when the user has explicitly asked us NOT to
+        // leave the transcription in the clipboard. The default was
+        // flipped to keep the transcription (`copyToClipboard = true`)
+        // because losing clipboard retention is far less costly than
+        // pasting the wrong content — an API key, a password, or any
+        // other sensitive thing the user previously copied.
+        //
+        // We also skip the restore entirely if AX is missing (the
+        // clipboard IS the paste at that point — the user will Cmd+V
+        // manually — so we must not overwrite it).
+        if !hexSettings.copyToClipboard && hasAXPermission {
             let savedSnapshot = snapshot
             Task { @MainActor in
-                // Give slower apps a short window to read the plain-text entry
-                // before we repopulate the clipboard with the user's previous rich data.
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: .milliseconds(3000))
+                let currentCount = pasteboard.changeCount
+                guard currentCount == targetChangeCount else {
+                    pasteboardLogger.info(
+                        "Skipping clipboard restore: pasteboard changed after paste (count=\(currentCount), expected=\(targetChangeCount))"
+                    )
+                    return
+                }
                 pasteboard.clearContents()
                 savedSnapshot.restore(to: pasteboard)
+                pasteboardLogger.debug("Restored previous clipboard contents after paste")
             }
-        }
-        
-        // If we failed to paste AND user doesn't want clipboard retention,
-        // show a notification that text is available in clipboard
-        if !pasteSucceeded && !hexSettings.copyToClipboard {
-            // Keep the transcribed text in clipboard regardless of setting
-            pasteboardLogger.notice("Paste operation failed; text remains in clipboard as fallback.")
-            
-            // TODO: Could add a notification here to inform user
-            // that text is available in clipboard
         }
     }
 
@@ -347,34 +501,73 @@ struct PasteboardClientLive {
         case failedToInsertText
     }
     
+    /// Cap on every AX call below. AX is an inter-process API
+    /// without a default timeout — by default, an unresponsive
+    /// focused app can hang the calling thread for ~6 s. We're on
+    /// the main thread here, so a hang freezes Quill's UI. 0.2 s
+    /// is comfortably above normal AX response times (1–10 ms) but
+    /// well below human-noticeable lag.
+    private static let axMessagingTimeout: Float = 0.2
+
     static func insertTextAtCursor(_ text: String) throws {
         // Get the system-wide accessibility element
         let systemWideElement = AXUIElementCreateSystemWide()
-        
+        AXUIElementSetMessagingTimeout(systemWideElement, axMessagingTimeout)
+
         // Get the focused element
         var focusedElementRef: CFTypeRef?
         let axError = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef)
-        
+
         guard axError == .success, let focusedElementRef = focusedElementRef else {
             throw PasteError.focusedElementNotFound
         }
-        
+
         let focusedElement = focusedElementRef as! AXUIElement
-        
+        AXUIElementSetMessagingTimeout(focusedElement, axMessagingTimeout)
+
         // Verify if the focused element supports text insertion
-        var value: CFTypeRef?
-        let supportsText = AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &value) == .success
-        let supportsSelectedText = AXUIElementCopyAttributeValue(focusedElement, kAXSelectedTextAttribute as CFString, &value) == .success
-        
+        var probeValue: CFTypeRef?
+        let supportsText = AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &probeValue) == .success
+        let supportsSelectedText = AXUIElementCopyAttributeValue(focusedElement, kAXSelectedTextAttribute as CFString, &probeValue) == .success
+
         if !supportsText && !supportsSelectedText {
             throw PasteError.elementDoesNotSupportTextEditing
         }
 
+        // Capture the element's value BEFORE the insert so we can
+        // verify the text actually landed. Some apps (particularly
+        // Electron-based inputs, custom-drawn text fields, and apps
+        // with incomplete AX implementations) return `.success` from
+        // `AXUIElementSetAttributeValue` but silently drop the write.
+        // Without verification, the user sees "nothing happened".
+        var beforeRef: CFTypeRef?
+        let beforeStatus = AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &beforeRef)
+        let beforeValue = (beforeStatus == .success) ? (beforeRef as? String) : nil
+
         // Insert text at cursor position by replacing selected text (or empty selection)
         let insertResult = AXUIElementSetAttributeValue(focusedElement, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
-        
+
         if insertResult != .success {
             throw PasteError.failedToInsertText
+        }
+
+        // Verify: read the value back. If the element exposes its
+        // value via AX, the `afterValue` should have grown to include
+        // our `text`. If it didn't change, the app accepted our set
+        // call but didn't actually apply it — treat as failure so the
+        // caller falls through to the clipboard path.
+        //
+        // Elements that didn't expose `kAXValueAttribute` for the
+        // `before` read are given the benefit of the doubt (the
+        // verification is skipped) — otherwise we'd break valid
+        // inserts into elements that only expose selected text.
+        if beforeValue != nil {
+            var afterRef: CFTypeRef?
+            let afterStatus = AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &afterRef)
+            let afterValue = (afterStatus == .success) ? (afterRef as? String) : nil
+            if let before = beforeValue, let after = afterValue, before == after {
+                throw PasteError.failedToInsertText
+            }
         }
     }
 }

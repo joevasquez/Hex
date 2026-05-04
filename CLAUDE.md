@@ -96,9 +96,11 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
    - **Tier 1 — AX sync** (`captureSelectionSync`): reads `kAXSelectedTextAttribute` from the focused element. Fast, no side effects. Works in native AppKit apps and most Cocoa text views.
    - **Tier 2 — Clipboard fallback** (`captureSelectionViaClipboard`): simulates Cmd+C, reads pasteboard, restores original clipboard. Works in Chrome, Electron (Slack, VS Code, Discord), and apps with non-standard text controls. Same approach as Raycast/Rewind.
 
-10. **Integrations surface**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections. As of 0.9.0:
-   - **Apple Reminders**: always-available adapter (`RemindersAdapter`, EventKit). Requires `com.apple.security.personal-information.calendars` entitlement + `NSRemindersUsageDescription`.
-   - **Todoist**: real REST adapter (`TodoistAdapter`). User pastes their API token via `TodoistTokenSheet` (Settings → Integrations → Connect on Todoist). Token validates against `GET /api/v1/projects` and is stored under `KeychainKey.todoistAPIToken`.
+10. **Integrations surface**: `HexCore/Models/Integration.swift` holds the static catalog (`todoist`, `appleReminders`, `calendar`, `googleCalendar`, `gmail`, `notion`, `things`, `slack`, `linear`) with per-integration tint, tagline, and Pro flag. `IntegrationConnectionStore` persists the connected set in UserDefaults under a cross-platform key. `IntegrationLimits.freeTierMaxConnections = 2` caps free-tier connections — but the cap counts **only non-Pro integrations** (`requiresPro == false`). Without that filter, signing into Google fills the cap with `.gmail` + `.googleCalendar` and disables every other Connect button. Five integrations ship with working adapters today:
+   - **Apple Reminders**: EventKit. macOS `RemindersAdapter` (TCA `@DependencyClient`) + iOS `IOSRemindersAdapter` (`@MainActor enum`). Requires `com.apple.security.personal-information.calendars` entitlement + `NSRemindersUsageDescription`.
+   - **Apple Calendar**: EventKit. `CalendarAdapter` (macOS) + `IOSCalendarAdapter` (iOS). Same entitlement + `NSCalendarsFullAccessUsageDescription`.
+   - **Todoist**: REST API. `TodoistAdapter` (macOS) + `IOSTodoistAdapter` (iOS). User pastes their API token via `TodoistTokenSheet` (macOS) / `TodoistTokenSheetIOS`. Token validates against `GET /api/v1/projects` and is stored under `KeychainKey.todoistAPIToken`.
+   - **Gmail + Google Calendar**: shared OAuth (one sign-in, both services). `GoogleOAuthClient` (macOS) + `IOSGoogleOAuthClient` (iOS) handle the auth flow via `ASWebAuthenticationSession` + PKCE against an **iOS-type** Google Cloud OAuth credential (Desktop-type clients are rejected by Google for custom URI scheme redirects since 2022). No client secret in source — PKCE replaces it. Adapters: `GmailAdapter` / `GoogleCalendarAdapter` on macOS, `IOSGmailAdapter` / `IOSGoogleCalendarAdapter` on iOS. Tokens stored under `KeychainKey.googleAccessToken` / `.googleRefreshToken` / `.googleTokenExpiry`. The integration set is treated as a UI cache; **OAuth keychain state is the source of truth for `.gmail`/`.googleCalendar`** — `QuilliOSApp.syncGoogleIntegrationsFromOAuth()` repairs the store on every launch so signing in/out of Google always reflects in the dropdown + Integrations rows.
    - Other integrations (Notion, Things, Slack, Linear) still show "Coming Soon" — send adapters land in follow-ups.
 
 11. **Action mode (macOS)**: Third HUD pill (Dictate → Edit → Action) routes voice commands to integrations. Pipeline: record → transcribe → `ActionParsingClient` produces `ActionIntent { actionType, targetIntegration, title, dueDate, notes, listName, priority }` → `ActionConfirmationPanel` (a key-capable `NSPanel` anchored below the menu bar) drops down with editable fields → user confirms → adapter creates the task. Key behaviors:
@@ -112,7 +114,19 @@ The app uses **The Composable Architecture (TCA)** for state management. Key arc
 
 13. **Auto-titles (iOS)**: New notes are created with empty `title` + `isAutoTitle = true`. `displayTitle` falls back to `Note.derivedTitle` until `NotesStore.generateTitleIfNeeded(noteID:provider:)` swaps in an LLM-generated 3–6 word title via `TextAIClient.generateTitle(for:provider:)`. Flipping `isAutoTitle = false` (either by the AI landing OR the user calling `renameNote`) locks the title so subsequent appends don't re-title. Legacy notes persisted before this field decode as `isAutoTitle = false` so their derived titles are preserved.
 
-14. **Privacy manifests**: Both targets ship `PrivacyInfo.xcprivacy` declaring `NSPrivacyAccessedAPICategoryUserDefaults` (reason `C56D.1`) and `NSPrivacyAccessedAPICategoryFileTimestamp` (reason `C617.1`). `NSPrivacyTracking = false`, no tracking domains, no collected data types — required for App Store submission on iOS 17+ and good hygiene on macOS.
+14. **Privacy manifests**: Both targets ship `PrivacyInfo.xcprivacy` declaring `NSPrivacyAccessedAPICategoryUserDefaults` (reason `C56D.1`) and `NSPrivacyAccessedAPICategoryFileTimestamp` (reason `C617.1`). With error monitoring enabled, both also declare `NSPrivacyCollectedDataTypeCrashData` (`Linked = false`, `Tracking = false`, purpose `AppFunctionality`). `NSPrivacyTracking = false`, no tracking domains.
+
+15. **Action mode (iOS)**: Mirrors macOS but uses `@MainActor enum` adapters instead of TCA. Triggered via the orange action FAB in the bottom cluster (`QuillFABCluster` — see iOS UI below). Pipeline: record → WhisperKit transcribes locally → `IOSActionParsingClient.parse()` LLM-parses transcript → `ActionConfirmationSheet` (SwiftUI sheet, `ObservableObject` view-model) → user confirms → `IOSSystemActionQueueExecutor.execute()` routes to the right iOS adapter. Same `ActionIntent` model as macOS, same `ActionSystemPrompt` (in HexCore). Five integrations supported today (see #10).
+
+16. **Offline action queue** (`HexCore/Sources/HexCore/Offline/`): persists Action-mode operations that fail because of transient network errors and replays them on reconnect. Two payload shapes:
+    - `.ready(ActionIntent)` — already parsed, just needs to dispatch (e.g. Gmail draft creation hit a 503).
+    - `.pendingParse(transcript:provider:)` — the LLM parse itself failed (user dictated offline), so the raw transcript is queued; on reconnect the manager parses via the registered `ActionQueueParser` and promotes to `.ready` before executing. Promotion is persisted, so a successful parse + failed execute doesn't re-pay the parse on the next pass.
+
+    `ActionQueueManager` (actor) owns persistence (`QueuedActionStore`, file-backed JSON in app-support), retry policy (exponential backoff with jitter, `RetryPolicy.default`), and a `NetworkMonitor` observer that triggers `processQueue()` on reconnect. Each app target installs an `ActionQueueExecutor` + `ActionQueueParser` at launch (`SystemActionQueueExecutor` / `SystemActionQueueParser` on macOS, `IOSSystemActionQueueExecutor` / `IOSActionQueueParser` on iOS). `QueueableErrorClassifier` decides which errors are transient (URLError transport failures, 5xx, 408, 429); permission/auth/cancel errors are NOT queued. UI: `OfflineQueueSectionView` (macOS Settings → General) + `OfflineQueueView` (iOS Settings → Offline) show pending items with retry/discard. The macOS menu-bar dropdown shows "N pending offline action(s)" via `MenuBarPendingActionsButton` when count > 0.
+
+17. **Error monitoring** (`HexCore/Sources/HexCore/Errors/` + per-target adapter): protocol-based (`ErrorMonitoringService`) with two implementations — `NoOpErrorMonitoring` (default; DEBUG builds echo to `HexLog.app`) and `SentryErrorMonitoring` (live; in `Hex/Clients/`, shared with iOS via `membershipExceptions` in pbxproj, `#if canImport(Sentry)` guards so the codebase compiles before/after the SDK is added). **Opt-in only** — `SentryErrorMonitoring.configure()` gates the SDK init on `ErrorMonitoringSettings.crashReportingEnabledKey` (defaults to false). Settings toggle in macOS General + iOS Privacy section; flipping it re-runs `ErrorMonitoring.configure()` so the SDK starts/stops live. Capture sites are deliberately sparse: AI processing failures, Google OAuth refresh failures, Gmail draft creation failures. Never include response bodies in captured context (they can echo user content).
+
+18. **Search**: iOS `NotesListView` has a custom search field (not `.searchable` — it gets re-tinted by iOS in unwanted ways) styled as a frosted capsule matching the header buttons; matches title/body/location case-insensitively. macOS `HistoryView` uses `.searchable` (placement `.toolbar`) and matches transcript text + source app name.
 
 ## Models (2025‑11)
 
@@ -205,6 +219,17 @@ The iOS app lives in the `Quill iOS/` folder (note: folder name has a space — 
 - `CustomModesView.swift` — Settings sub-screen for managing user-authored AI modes. Persists via `@AppStorage` under `CustomAIModesStorage.userDefaultsKey`. Modes surface as chips in the main screen's mode row (see `CustomModeChip` in ContentView).
 - `IntegrationsView.swift` — Settings sub-screen listing the integrations catalog (`HexCore/Models/Integration.swift`). Frontend-only; connection state persisted via `IntegrationConnectionStore` in UserDefaults. Free tier capped at `IntegrationLimits.freeTierMaxConnections = 2`.
 - `QuillDeepLinkRouter.swift` — `@MainActor ObservableObject` that parses incoming `quill://` URLs (from the widget) into a `QuillDeepLink` enum. `ContentView` observes `pendingLink` and routes: `.record` starts a new note + recording, `.notes` shows the notes list.
+
+#### Reusable iOS UI components (`Quill iOS/Views/`)
+
+These exist so individual screens stop reinventing the same chrome. When in doubt, use them; if a screen needs something subtly different, copy + tweak rather than parameterize each component to death.
+
+- `QuillHeaderBar.swift` — purple gradient band with rounded bottom corners (24pt `UnevenRoundedRectangle`), Quill wordmark + feather, three trailing 36pt frosted-circle buttons (notes list / new / settings). All button actions are passed in as closures so the host owns the navigation state.
+- `QuillActiveNoteStrip.swift` — under-header strip with the note title, lavender-chip edit-text icon, location/time/word-count metadata, and an optional `recordingElapsed: TimeInterval?` that swaps the right edge for a pulsing red dot + `M:SS` timer.
+- `QuillFABCluster.swift` — bottom-right cluster. Single `+` button at rest; tap fans up into a vertical stack of dictate (top, with the `QuillModeDropdown` floating in to its leading edge), photo, action FABs. While recording, the `+` itself flips to a red `stop.fill` button — single-tap to stop.
+- `QuillModeDropdown.swift` — single pill that opens a system Menu listing built-in + custom AI modes. Modes that need an LLM are greyed out + show "Needs API key" when the current provider has no key in Keychain; tapping a greyed-out mode surfaces an alert pointing to Settings instead of silently selecting nothing.
+- `QuillEmptyHome.swift` — pre-recording landing ("Ready when you are." + three teaching chips), shown when there's no active note and the user isn't recording.
+- `QuillRecordingState.swift` — split into `QuillRecordingTranscriptCard` (white card in the scroll area; internally scrolling at `maxHeight: 280` with auto-scroll-to-bottom on transcript change) + `WaveformBottomBar` (lavender-gradient card pinned to the bottom via `.safeAreaInset`, 32 vertical purple bars driven by `vm.meterLevel` via `.onChange` — **don't** use `Timer.publish` + `onReceive` here, the closure captures `meterLevel` once and never sees fresh values).
 
 ### Widget (iOS home-screen)
 
@@ -305,75 +330,69 @@ The iOS target is a `PBXFileSystemSynchronizedRootGroup` — new files in `Quill
 
 ## Releasing a New Version
 
-Releases are automated via a local CLI tool that handles building, signing, notarizing, and uploading.
+Two release scripts live at `tools/scripts/`. Both are bash, both read prerequisites from the keychain / env, neither uses the `tools/src/cli.ts` path that earlier docs referenced (that path doesn't exist).
 
-### Prerequisites
+### macOS (DMG via GitHub Releases + Sparkle)
 
-1. **AWS credentials** must be set (for S3 uploads):
+```bash
+bash tools/scripts/release.sh [VERSION]
+```
+
+If `VERSION` is omitted, the script reads from `Hex/Info.plist`. The script doesn't auto-bump the version — bump first by running `bun run changeset:version` (which folds pending changesets into `Hex/Resources/changelog.md` and bumps `package.json` + `Info.plist`).
+
+**Prerequisites** (one-time):
+1. Developer ID Application certificate in the login keychain. Verify: `security find-identity -p codesigning -v`.
+2. Notarization credentials stored under profile `QUILL_NOTARY`:
    ```bash
-   export AWS_ACCESS_KEY_ID=...
-   export AWS_SECRET_ACCESS_KEY=...
+   xcrun notarytool store-credentials QUILL_NOTARY \
+     --apple-id "you@example.com" \
+     --team-id  ND4KZ9EE2W \
+     --password "APP_SPECIFIC_PASSWORD"
    ```
+   App-specific password from appleid.apple.com → Sign-In and Security.
 
-2. **Notarization credentials** stored in keychain (one-time setup):
+**What it does**: archives via xcodebuild → exports + signs with Developer ID → notarizes the .app → creates + signs the DMG → notarizes + staples the DMG → emits build artifacts to `build/release/`. The script does NOT push commits, tags, or upload to S3 / GitHub — that's a separate manual step (or wrap with your own automation).
+
+Output:
+- `build/release/Hex-latest.dmg` — signed, notarized, stapled DMG
+- `build/release/release-notes.md` — extracted notes for this version
+
+### iOS (TestFlight)
+
+```bash
+bash tools/scripts/testflight.sh
+```
+
+Auto-bumps `CFBundleVersion` in `Quill iOS/Info.plist` (App Store Connect requires strictly-higher build numbers). If the upload fails, revert with `git checkout "Quill iOS/Info.plist"`.
+
+**Prerequisites** (one-time):
+1. Apple Distribution cert in the login keychain, OR Xcode signed into the Apple ID so `-allowProvisioningUpdates` can mint one.
+2. App Store Connect API key `.p8` file at one of: `./private_keys`, `~/private_keys`, `~/.private_keys`, `~/.appstoreconnect/private_keys` (recommended). Filename: `AuthKey_<KEY_ID>.p8`.
+3. App Store Connect app record with bundle ID `com.joevasquez.Quill.iOS`.
+
+**Env overrides**:
+- `QUILL_ASC_KEY_ID` (default `3QDATSKTNN`)
+- `QUILL_ASC_ISSUER_ID` (default `69a6de80-182b-47e3-e053-5b8c7c11a4d1`)
+
+**What it does**: archives → exports App Store-signed `.ipa` → uploads to App Store Connect via `xcrun altool`. After upload, TestFlight processes it (a few minutes) and notifies testers.
+
+Output:
+- `build/testflight/Quill-iOS-<build>.ipa`
+
+### Pre-release checklist
+
+1. Working tree clean (commit or stash first).
+2. Changeset exists for any user-facing change:
    ```bash
-   xcrun notarytool store-credentials "AC_PASSWORD"
+   bun run changeset:add-ai patch "Your summary here"
    ```
-
-3. **Dependencies installed** at project root and in tools:
-   ```bash
-   bun install                # project root (for changesets)
-   cd tools && bun install    # tools dependencies
-   ```
-
-### Release Steps
-
-1. **Ensure all changes are committed** - the release tool requires a clean working tree
-
-2. **Ensure changesets exist** - any user-facing change should have a `.changeset/*.md` file:
-   ```bash
-   bun run changeset:add-ai patch "Fix microphone selection"
-   ```
-
-3. **Run the release command** from project root:
-   ```bash
-   bun run tools/src/cli.ts release
-   ```
-
-### What the Release Tool Does
-
-1. Checks for clean working tree
-2. Finds pending changesets and applies them (bumps version in `package.json`)
-3. Syncs changelog to `Hex/Resources/changelog.md`
-4. Updates `Info.plist` and `project.pbxproj` with new version
-5. Increments build number
-6. Cleans DerivedData and archives with xcodebuild
-7. Exports and signs with Developer ID
-8. Notarizes app with Apple
-9. Creates and signs DMG
-10. Notarizes DMG
-11. Generates Sparkle appcast
-12. Uploads to S3 (versioned DMG + `hex-latest.dmg` + appcast.xml)
-13. Commits version changes, creates git tag, pushes
-14. Creates GitHub release with DMG and ZIP attachments
-
-### If No Changesets Exist
-
-The tool will prompt you to either:
-- Stop and create a changeset (recommended)
-- Continue with manual version bump (useful for re-running failed releases)
-
-### Artifacts
-
-Each release produces:
-- `Hex-{version}.dmg` - Signed, notarized DMG
-- `Hex-{version}.zip` - For Homebrew cask
-- `hex-latest.dmg` - Always points to latest
-- `appcast.xml` - Sparkle update feed
+3. `bun run changeset:version` → bumps + writes changelog. Commit the result.
+4. macOS: `bash tools/scripts/release.sh`. iOS: `bash tools/scripts/testflight.sh`.
+5. After a successful macOS build, manually upload the DMG to GitHub Releases and (if hosting your own appcast) S3.
 
 ### Troubleshooting
 
-- **"Working tree is not clean"**: Commit or stash all changes before releasing
-- **Notarization fails**: Check Apple ID credentials and app-specific password
-- **S3 upload fails**: Verify AWS credentials and bucket permissions
-- **Build fails**: Ensure Xcode 16+ and valid code signing certificates
+- **"Working tree is not clean"**: commit or stash before releasing.
+- **Notarization fails**: re-verify the `QUILL_NOTARY` keychain profile + app-specific password hasn't expired.
+- **Build fails on `xcodebuild`**: ensure `xcode-select` points at `/Applications/Xcode.app/Contents/Developer`, not `/Library/Developer/CommandLineTools`. Both scripts pin `DEVELOPER_DIR` at the top to defend against this.
+- **TestFlight rejects upload with "build number must be higher"**: the auto-bump should handle this; if it didn't, manually bump `CFBundleVersion` in `Quill iOS/Info.plist` and re-run.

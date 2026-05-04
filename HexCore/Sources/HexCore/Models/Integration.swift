@@ -9,6 +9,9 @@ public struct Integration: Identifiable, Equatable, Hashable, Sendable {
   public enum Identifier: String, CaseIterable, Sendable {
     case todoist
     case appleReminders
+    case calendar
+    case googleCalendar
+    case gmail
     case notion
     case things
     case slack
@@ -40,6 +43,30 @@ public struct Integration: Identifiable, Equatable, Hashable, Sendable {
       tintHex: "#FF9500",
       tagline: "Native iCloud Reminders — picked list, smart due dates from your dictation.",
       requiresPro: false
+    ),
+    .init(
+      identifier: .calendar,
+      name: "Calendar",
+      systemImage: "calendar",
+      tintHex: "#FF2D55",
+      tagline: "Create calendar events from dictation — \"schedule a meeting with John on Friday at 2pm\".",
+      requiresPro: false
+    ),
+    .init(
+      identifier: .googleCalendar,
+      name: "Google Calendar",
+      systemImage: "calendar.badge.clock",
+      tintHex: "#4285F4",
+      tagline: "Direct Google Calendar API — create events, check availability, manage calendars.",
+      requiresPro: true
+    ),
+    .init(
+      identifier: .gmail,
+      name: "Gmail",
+      systemImage: "envelope.fill",
+      tintHex: "#EA4335",
+      tagline: "Draft emails from dictation — \"email Mike about the quarterly review\" becomes a Gmail draft.",
+      requiresPro: true
     ),
     .init(
       identifier: .notion,

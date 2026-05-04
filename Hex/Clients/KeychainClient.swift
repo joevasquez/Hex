@@ -47,6 +47,9 @@ enum KeychainKey {
   static let openAIAPIKey = "com.joevasquez.Quill.openAIAPIKey"
   static let anthropicAPIKey = "com.joevasquez.Quill.anthropicAPIKey"
   static let todoistAPIToken = "com.joevasquez.Quill.todoistAPIToken"
+  static let googleAccessToken = "com.joevasquez.Quill.googleAccessToken"
+  static let googleRefreshToken = "com.joevasquez.Quill.googleRefreshToken"
+  static let googleTokenExpiry = "com.joevasquez.Quill.googleTokenExpiry"
 }
 
 // MARK: - Live Implementation

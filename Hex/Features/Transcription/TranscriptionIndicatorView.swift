@@ -69,6 +69,7 @@ struct TranscriptionIndicatorView: View {
   /// Non-nil after an inline edit lands — drives the ✓/✗ pill.
   var pendingEditResult: TranscriptionFeature.PendingEditResult?
   var onCycleMode: () -> Void
+  var onEditAccept: () -> Void
   var onEditUndo: () -> Void
 
   // MARK: Body
@@ -76,6 +77,7 @@ struct TranscriptionIndicatorView: View {
   var body: some View {
     VStack(spacing: 6) {
       pill
+        .onTapGesture { onCycleMode() }
         .compositingGroup()
         .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
         .shadow(color: shadowGlow.opacity(0.3), radius: 12)
@@ -93,15 +95,12 @@ struct TranscriptionIndicatorView: View {
           .transition(.move(edge: .top).combined(with: .opacity))
       }
 
-      // Accept / Undo pill after inline edit
+      // Reject / Accept buttons after inline edit
       if pendingEditResult != nil {
         editAcceptancePill
           .transition(.move(edge: .top).combined(with: .opacity))
       }
     }
-    // Drag is handled natively by HUDPanel (isMovableByWindowBackground).
-    // Only tap is handled here for mode cycling.
-    .onTapGesture { onCycleMode() }
     .animation(.snappy(duration: 0.3), value: status)
     .animation(.snappy(duration: 0.25), value: mode)
     .animation(.snappy(duration: 0.25), value: editMessage != nil)
@@ -144,24 +143,61 @@ struct TranscriptionIndicatorView: View {
     }
   }
 
-  // MARK: Undo chip
+  // MARK: Reject / Accept buttons
 
   private var editAcceptancePill: some View {
-    Button {
-      onEditUndo()
-    } label: {
-      HStack(spacing: 4) {
-        Image(systemName: "arrow.uturn.backward")
-          .font(.system(size: 10, weight: .bold))
-        Text("Undo")
-          .font(.system(size: 11, weight: .semibold))
+    HStack(spacing: 2) {
+      Button {
+        onEditUndo()
+      } label: {
+        HStack(spacing: 4) {
+          Image(systemName: "xmark")
+            .font(.system(size: 9, weight: .bold))
+          Text("Reject")
+            .font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+          RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(.white.opacity(0.08))
+        )
       }
-      .foregroundStyle(.white)
-      .padding(.horizontal, 12)
-      .padding(.vertical, 6)
-      .background(Capsule().fill(.red.opacity(0.6)))
+      .buttonStyle(.plain)
+
+      Button {
+        onEditAccept()
+      } label: {
+        HStack(spacing: 4) {
+          Image(systemName: "checkmark")
+            .font(.system(size: 9, weight: .bold))
+          Text("Keep")
+            .font(.system(size: 11, weight: .semibold))
+          RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(.white.opacity(0.25))
+            .frame(width: 14, height: 14)
+            .overlay(
+              Image(systemName: "return")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.white)
+            )
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+          RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(.green)
+        )
+      }
+      .buttonStyle(.plain)
     }
-    .buttonStyle(.plain)
+    .padding(3)
+    .background(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(.black.opacity(0.7))
+    )
   }
 
   // MARK: Mode chip — always visible on the left
@@ -356,34 +392,34 @@ private struct PulseModifier: ViewModifier {
       status: .idle, mode: .dictate,
       meter: .init(averagePower: 0, peakPower: 0),
       hotkeyHint: "Hold ⌥ Space to dictate",
-      onCycleMode: {}, onEditUndo: {}
+      onCycleMode: {}, onEditAccept: {}, onEditUndo: {}
     )
     TranscriptionIndicatorView(
       status: .idle, mode: .edit,
       meter: .init(averagePower: 0, peakPower: 0),
       hotkeyHint: "Hold ⌥ Space to edit",
       editMessage: "Highlight text first",
-      onCycleMode: {}, onEditUndo: {}
+      onCycleMode: {}, onEditAccept: {}, onEditUndo: {}
     )
     TranscriptionIndicatorView(
       status: .recording, mode: .dictate,
       meter: .init(averagePower: 0.5, peakPower: 0.7),
       recordingStartTime: Date().addingTimeInterval(-5),
       hotkeyHint: "Hold ⌥ Space to dictate",
-      onCycleMode: {}, onEditUndo: {}
+      onCycleMode: {}, onEditAccept: {}, onEditUndo: {}
     )
     TranscriptionIndicatorView(
       status: .idle, mode: .edit,
       meter: .init(averagePower: 0, peakPower: 0),
       hotkeyHint: "Hold ⌥ Space to edit",
       pendingEditResult: .init(original: "old", edited: "new", sourceAppBundleID: nil),
-      onCycleMode: {}, onEditUndo: {}
+      onCycleMode: {}, onEditAccept: {}, onEditUndo: {}
     )
     TranscriptionIndicatorView(
       status: .aiProcessing, mode: .edit,
       meter: .init(averagePower: 0, peakPower: 0),
       hotkeyHint: "Hold ⌥ Space to edit",
-      onCycleMode: {}, onEditUndo: {}
+      onCycleMode: {}, onEditAccept: {}, onEditUndo: {}
     )
   }
   .padding(40)

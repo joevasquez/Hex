@@ -17,6 +17,7 @@ import Dependencies
 import DependenciesMacros
 import Foundation
 import HexCore
+import Sauce
 
 private let inlineEditLogger = HexLog.pasteboard
 
@@ -51,6 +52,15 @@ struct InlineEditClient {
   /// PasteboardClient uses for its primary paste path, so it works
   /// in all the same apps (browsers, native AppKit, most Electron).
   var replaceSelection: @Sendable (String) async -> Bool = { _ in false }
+
+  /// Sends Cmd+Z to the source app to undo the last inline edit.
+  /// After an inline edit, the cursor is collapsed at the end of
+  /// the inserted text — there's no active selection to "replace"
+  /// back. The system's own undo stack is the only reliable way
+  /// to restore the original text, since both AX-set and paste
+  /// register as a single undoable action in any app with menu-
+  /// bound Cmd+Z (which is essentially every macOS app).
+  var undoLastEdit: @Sendable (String?) async -> Void = { _ in }
 }
 
 extension InlineEditClient: DependencyKey {
@@ -70,6 +80,9 @@ extension InlineEditClient: DependencyKey {
       },
       replaceSelection: { text in
         await MainActor.run { replaceSelectionSync(with: text) }
+      },
+      undoLastEdit: { bundleID in
+        await sendUndoToSourceApp(bundleID: bundleID)
       }
     )
   }
@@ -320,6 +333,61 @@ private func replaceSelectionSync(with text: String) -> Bool {
     return false
   }
   return true
+}
+
+// MARK: - Undo via Cmd+Z
+
+/// Reactivate the source app (HUD click might have shifted focus on
+/// some setups, even though `HUDPanel` is non-activating) and send
+/// Cmd+Z to trigger the system undo. Mirrors the activation pattern
+/// used by `PasteboardClient.reactivateSourceApp` so the keystroke
+/// goes to the right window.
+@MainActor
+private func sendUndoToSourceApp(bundleID: String?) async {
+  guard AXIsProcessTrusted() else {
+    inlineEditLogger.warning("Inline edit undo: AX permission missing; cannot post Cmd+Z")
+    return
+  }
+
+  // Reactivate the source app if we know it.
+  let quillBundles: Set<String> = ["com.joevasquez.Quill", "com.joevasquez.Quill.debug"]
+  if let bundleID, !quillBundles.contains(bundleID) {
+    let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+    if let app = running.first {
+      let alreadyFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
+      if !alreadyFront {
+        app.activate(options: [.activateIgnoringOtherApps])
+      }
+      // 120 ms covers Arc, Chrome, VS Code, and Electron apps where
+      // focus settling lags the activation call.
+      try? await Task.sleep(for: .milliseconds(120))
+    }
+  }
+
+  // Refuse if we're still frontmost — Cmd+Z would undo something in
+  // Quill itself instead of in the user's text editor.
+  if let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+     quillBundles.contains(frontBundle)
+  {
+    inlineEditLogger.warning("Inline edit undo: Quill is frontmost; refusing to send Cmd+Z")
+    return
+  }
+
+  let source = CGEventSource(stateID: .combinedSessionState)
+  let zKey = Sauce.shared.keyCode(for: .z)
+  let cmdKey: CGKeyCode = 55  // Left Command
+
+  let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: cmdKey, keyDown: true)
+  let zDown = CGEvent(keyboardEventSource: source, virtualKey: zKey, keyDown: true)
+  zDown?.flags = .maskCommand
+  let zUp = CGEvent(keyboardEventSource: source, virtualKey: zKey, keyDown: false)
+  zUp?.flags = .maskCommand
+  let cmdUp = CGEvent(keyboardEventSource: source, virtualKey: cmdKey, keyDown: false)
+
+  cmdDown?.post(tap: .cghidEventTap)
+  zDown?.post(tap: .cghidEventTap)
+  zUp?.post(tap: .cghidEventTap)
+  cmdUp?.post(tap: .cghidEventTap)
 }
 
 // MARK: - Prompt

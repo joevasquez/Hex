@@ -110,6 +110,7 @@
 			membershipExceptions = (
 				Clients/AIProcessingClient.swift,
 				Clients/KeychainClient.swift,
+				Clients/SentryErrorMonitoring.swift,
 			);
 			target = F5D5A10E2F9438B200A3E16D /* Quill iOS */;
 		};

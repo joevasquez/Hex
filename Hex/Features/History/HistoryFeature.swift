@@ -396,7 +396,22 @@ struct HistoryView: View {
 	let store: StoreOf<HistoryFeature>
 	@State private var showingDeleteConfirmation = false
 	@State private var isDropTargeted = false
+	@State private var searchQuery: String = ""
 	@Shared(.hexSettings) var hexSettings: HexSettings
+
+	/// Transcripts filtered by the current search query. Matches case-
+	/// insensitively against the transcript text and the source app name
+	/// — so "slack" surfaces every dictation routed into Slack.
+	private var visibleTranscripts: [Transcript] {
+		let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !trimmed.isEmpty else { return store.transcriptionHistory.history }
+		return store.transcriptionHistory.history.filter { transcript in
+			if transcript.text.localizedCaseInsensitiveContains(trimmed) { return true }
+			if let app = transcript.sourceAppName,
+			   app.localizedCaseInsensitiveContains(trimmed) { return true }
+			return false
+		}
+	}
 
 	var body: some View {
       Group {
@@ -420,10 +435,12 @@ struct HistoryView: View {
             } description: {
               Text("Your transcription history will appear here.")
             }
+          } else if visibleTranscripts.isEmpty {
+            ContentUnavailableView.search(text: searchQuery)
           } else {
             ScrollView {
               LazyVStack(spacing: 12) {
-                ForEach(store.transcriptionHistory.history) { transcript in
+                ForEach(visibleTranscripts) { transcript in
                   TranscriptView(
                     transcript: transcript,
                     isPlaying: store.playingTranscriptID == transcript.id,
@@ -451,6 +468,7 @@ struct HistoryView: View {
           }
         }
       }
+      .searchable(text: $searchQuery, placement: .toolbar, prompt: "Search transcripts")
       .onDrop(of: [.audio, .movie], isTargeted: $isDropTargeted) { providers in
         handleDrop(providers)
       }

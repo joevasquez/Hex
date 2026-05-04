@@ -19,11 +19,6 @@ struct TodoistAdapter {
   var fetchProjects: @Sendable () async -> [TodoistProject] = { [] }
 }
 
-struct TodoistProject: Equatable, Sendable, Identifiable {
-  let id: String
-  let name: String
-}
-
 extension TodoistAdapter: DependencyKey {
   static var liveValue: Self {
     .init(

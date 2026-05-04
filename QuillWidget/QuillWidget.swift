@@ -94,63 +94,20 @@ struct QuillWidgetView: View {
   }
 }
 
-/// A slim, filled quill/feather drawn as a SwiftUI `Shape`. Uses a
-/// vector path rather than the PNG asset because the shipped feather
-/// PNG is a thin outline that collapses to an unreadable stroke at
-/// widget-icon sizes.
-///
-/// Drawn into a tall-and-narrow bounding rect so the shape reads as
-/// a *quill* (vertical pen-feather) rather than a leaf. Slanted to
-/// the right so it visually agrees with the adjacent serif wordmark.
-private struct FeatherShape: Shape {
-  func path(in rect: CGRect) -> Path {
-    let w = rect.width
-    let h = rect.height
-    var path = Path()
-
-    // Main blade — slim almond shape, tip at top-left, nib at
-    // bottom-right. Narrower along its minor axis than a leaf so it
-    // reads as a pen-feather and not a vegetable.
-    path.move(to: CGPoint(x: w * 0.18, y: h * 0.06))
-    path.addQuadCurve(
-      to: CGPoint(x: w * 0.82, y: h * 0.88),
-      control: CGPoint(x: w * 0.98, y: h * 0.04)
-    )
-    path.addQuadCurve(
-      to: CGPoint(x: w * 0.18, y: h * 0.06),
-      control: CGPoint(x: w * 0.28, y: h * 0.70)
-    )
-    path.closeSubpath()
-
-    // Tapered nib extending past the main blade's bottom tip.
-    path.move(to: CGPoint(x: w * 0.78, y: h * 0.86))
-    path.addLine(to: CGPoint(x: w * 0.95, y: h * 0.98))
-    path.addLine(to: CGPoint(x: w * 0.84, y: h * 0.90))
-    path.closeSubpath()
-
-    return path
-  }
-}
-
-/// Feather + "Quill" wordmark used as the widget's branding. The
-/// feather sits in a slightly taller-than-wide box (aspect 0.75) so
-/// it reads as a slim pen rather than a fat leaf, and is sized a
-/// touch smaller than the wordmark's cap height so the "Quill" text
-/// leads visually.
 private struct QuillMark: View {
-  /// Height of the feather. The wordmark is sized up a little
-  /// relative to this so the two read as a balanced pair.
   var iconHeight: CGFloat = 18
   var textSize: CGFloat = 16
 
   var body: some View {
     HStack(alignment: .firstTextBaseline, spacing: 5) {
-      FeatherShape()
-        .fill(Color.white)
-        // Narrower-than-tall box keeps the feather slim.
-        .frame(width: iconHeight * 0.75, height: iconHeight)
+      Image("Feather")
+        .renderingMode(.template)
+        .resizable()
+        .aspectRatio(contentMode: .fit)
+        .foregroundStyle(.white)
+        .frame(height: iconHeight)
         .shadow(color: .black.opacity(0.2), radius: 1.5, y: 1)
-        .offset(y: iconHeight * 0.1)  // nudge down so it sits on text baseline
+        .offset(y: iconHeight * 0.1)
       Text("Quill")
         .font(.system(size: textSize, weight: .semibold, design: .serif))
         .foregroundStyle(.white)

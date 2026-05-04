@@ -20,6 +20,7 @@ final class RecordingViewModel: ObservableObject {
     case recording
     case transcribing
     case aiProcessing
+    case actionParsing
     case done
     case error(String)
   }
@@ -33,6 +34,11 @@ final class RecordingViewModel: ObservableObject {
   /// Set when an AI post-processing call failed and we fell back to
   /// the raw transcript. Cleared on the next successful run.
   @Published var aiErrorMessage: String?
+  /// Set when an Action recording finishes parsing. ContentView
+  /// presents the confirmation sheet in response.
+  @Published var parsedIntent: ActionIntent?
+  /// True when the current recording was started via the Action FAB.
+  var isActionRecording: Bool = false
   /// True while the WhisperKit model is loading (first launch, or
   /// after the user changes models in Settings). Surfaced in the
   /// status area so the user knows why the first transcription is
@@ -98,15 +104,36 @@ final class RecordingViewModel: ObservableObject {
   ) async {
     switch phase {
     case .idle, .done, .error:
+      isActionRecording = false
       await startRecording(model: model, mode: mode, provider: provider)
     case .recording:
-      await stopAndProcess(
-        model: model,
-        mode: mode,
-        provider: provider,
-        voiceCommandsEnabled: voiceCommandsEnabled,
-        customSystemPrompt: customSystemPrompt
-      )
+      if isActionRecording {
+        await stopAndParseAction(model: model, provider: provider)
+      } else {
+        await stopAndProcess(
+          model: model,
+          mode: mode,
+          provider: provider,
+          voiceCommandsEnabled: voiceCommandsEnabled,
+          customSystemPrompt: customSystemPrompt
+        )
+      }
+    default:
+      break
+    }
+  }
+
+  func toggleActionRecording(
+    model: String,
+    provider: AIProvider
+  ) async {
+    switch phase {
+    case .idle, .done, .error:
+      isActionRecording = true
+      parsedIntent = nil
+      await startRecording(model: model, mode: .off, provider: provider)
+    case .recording:
+      await stopAndParseAction(model: model, provider: provider)
     default:
       break
     }
@@ -229,6 +256,71 @@ final class RecordingViewModel: ObservableObject {
       phase = .error("Transcription failed: \(error.localizedDescription)")
     }
   }
+
+  private func stopAndParseAction(
+    model: String,
+    provider: AIProvider
+  ) async {
+    timerTask?.cancel()
+    let url = recorder.stopRecording()
+    phase = .transcribing
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+    guard let url else {
+      phase = .error("Recording file was not produced")
+      return
+    }
+
+    do {
+      if whisperKit == nil || whisperKit?.modelFolder?.lastPathComponent != model {
+        whisperKit = try await WhisperKit(
+          WhisperKitConfig(model: model, download: true)
+        )
+      }
+
+      let results = try await whisperKit!.transcribe(audioPath: url.path)
+      let rawText = results.map(\.text).joined(separator: " ")
+      let cleaned = WhisperOutputCleaner.clean(rawText)
+      rawTranscript = cleaned
+
+      try? FileManager.default.removeItem(at: url)
+
+      if cleaned.isEmpty {
+        phase = .error("No speech detected. Try again.")
+        return
+      }
+
+      phase = .actionParsing
+      // Inner do/catch — transient network failures here become queued
+      // raw transcripts (replayed when connectivity returns), instead
+      // of being lost as a flash error. Outer catch still covers
+      // WhisperKit / file IO failures, which queueing wouldn't help.
+      do {
+        let intent = try await IOSActionParsingClient.parse(
+          transcript: cleaned,
+          provider: provider
+        )
+        parsedIntent = intent
+        phase = .done
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+      } catch {
+        if QueueableErrorClassifier.isQueueable(error) {
+          await ActionQueueManager.shared.enqueueTranscript(
+            cleaned,
+            provider: provider,
+            lastError: error.localizedDescription
+          )
+          phase = .done
+          UINotificationFeedbackGenerator().notificationOccurred(.warning)
+          NotificationCenter.default.post(name: .quillActionQueuedOffline, object: nil)
+        } else {
+          phase = .error("Action parsing failed: \(error.localizedDescription)")
+        }
+      }
+    } catch {
+      phase = .error("Action parsing failed: \(error.localizedDescription)")
+    }
+  }
 }
 
 struct ContentView: View {
@@ -237,6 +329,7 @@ struct ContentView: View {
   @AppStorage(QuillIOSSettingsKey.aiProvider) private var aiProviderRaw: String = QuillIOSSettingsKey.defaultProvider
   @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
   @AppStorage(CustomAIModesStorage.userDefaultsKey) private var customModesData: Data = Data()
+  @AppStorage(QuillIOSSettingsKey.disabledBuiltInModes) private var disabledBuiltInModesData: Data = Data()
 
   @StateObject private var vm = RecordingViewModel()
   @StateObject private var notes = NotesStore.shared
@@ -255,6 +348,12 @@ struct ContentView: View {
   @State private var shareRequest: ShareRequest?
   @State private var isBuildingPDF = false
   @State private var pendingDeleteNoteID: UUID?
+  @State private var showingActionConfirmation = false
+  /// Transient banner state — set true when an action mode item is queued
+  /// because we're offline. Auto-clears after a few seconds via the task
+  /// kicked off in `.onReceive`.
+  @State private var showOfflineQueuedBanner = false
+  @State private var offlineBannerDismissTask: Task<Void, Never>?
 
   /// The currently-selected mode, which may be either a built-in
   /// `AIProcessingMode` or a user-created custom mode. Stored as
@@ -297,11 +396,20 @@ struct ContentView: View {
           ScrollViewReader { proxy in
             ScrollView {
               VStack(spacing: 20) {
-                modeChipRow
+                // Mode picker is no longer pinned to the canvas top —
+                // it floats up next to the dictate button when the user
+                // expands the FAB cluster (see `QuillFABCluster`).
                 resultArea
-                // Reserve space below the note so the floating mic/camera
-                // cluster doesn't overlap the last line or action buttons.
-                Color.clear.frame(height: 140).id("noteBottom")
+                // Bottom-of-scroll buffer. During recording the safe-area
+                // inset (waveform card) already pads the scroll content,
+                // so we only need a small breath between the transcript
+                // card and the waveform — 24pt. When not recording, the
+                // FAB cluster sits in a separate ZStack overlay above
+                // the scroll, so we keep 140pt to ensure the last note
+                // line / action buttons aren't hidden behind it.
+                Color.clear
+                  .frame(height: vm.phase == .recording ? 24 : 140)
+                  .id("noteBottom")
               }
               .padding(.horizontal)
               .padding(.top, 16)
@@ -311,6 +419,17 @@ struct ContentView: View {
             .onChange(of: notes.activeNote?.body) { _, _ in
               withAnimation(.easeOut(duration: 0.4)) {
                 proxy.scrollTo("noteBottom", anchor: .bottom)
+              }
+            }
+            // Pin the waveform card just above the FAB cluster while
+            // recording. `safeAreaInset` is the cleanest way to do this:
+            // the scroll view's content automatically gets padded so it
+            // doesn't slide under the waveform.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+              if vm.phase == .recording {
+                WaveformBottomBar(vm: vm)
+                  .padding(.bottom, 116) // clear the FAB cluster + push up a bit per the spec
+                  .transition(.move(edge: .bottom).combined(with: .opacity))
               }
             }
           }
@@ -372,6 +491,11 @@ struct ContentView: View {
       .sheet(item: $shareRequest) { req in
         ShareSheet(items: req.items)
       }
+      .sheet(isPresented: $showingActionConfirmation) {
+        if let intent = vm.parsedIntent {
+          ActionConfirmationSheet(intent: intent)
+        }
+      }
       .onAppear {
         idlePulse = true
         // Pre-warm the Whisper model immediately on first appear so
@@ -412,8 +536,29 @@ struct ContentView: View {
         }
       }
       .onChange(of: vm.phase) { _, newPhase in
-        if case .done = newPhase {
+        if case .done = newPhase, !vm.isActionRecording {
           appendTranscriptToActiveNote()
+        }
+      }
+      .onChange(of: vm.parsedIntent) { _, intent in
+        if intent != nil {
+          showingActionConfirmation = true
+        }
+      }
+      .onReceive(NotificationCenter.default.publisher(for: .quillActionQueuedOffline)) { _ in
+        // Show a transient pill above the FAB cluster acknowledging the
+        // queue. Auto-dismiss after 3s — long enough to read, short
+        // enough not to nag.
+        offlineBannerDismissTask?.cancel()
+        withAnimation(.spring(duration: 0.3, bounce: 0.2)) {
+          showOfflineQueuedBanner = true
+        }
+        offlineBannerDismissTask = Task { @MainActor in
+          try? await Task.sleep(for: .seconds(3))
+          guard !Task.isCancelled else { return }
+          withAnimation(.easeOut(duration: 0.3)) {
+            showOfflineQueuedBanner = false
+          }
         }
       }
     }
@@ -501,159 +646,36 @@ struct ContentView: View {
 
   // MARK: - Custom header
 
+  /// Reusable purple header. The component lives in
+  /// `Views/QuillHeaderBar.swift` so future screens (empty home,
+  /// recording state, action confirmation) drop it in identically.
   private var headerBar: some View {
-    HStack(spacing: 12) {
-      logoMark
-
-      Text("Quill")
-        .font(.system(size: 34, weight: .bold, design: .serif))
-        .foregroundStyle(.white)
-        .kerning(0.5)
-        .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
-
-      Spacer()
-
-      Button {
-        UISelectionFeedbackGenerator().selectionChanged()
-        showingNotesList = true
-      } label: {
-        Image(systemName: "list.bullet")
-          .font(.title3.weight(.semibold))
-          .foregroundStyle(.white)
-          .frame(width: 36, height: 36)
-          .background(Circle().fill(Color.white.opacity(0.18)))
-          .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-      }
-      .buttonStyle(.plain)
-      .accessibilityLabel("All notes")
-
-      Button {
-        UISelectionFeedbackGenerator().selectionChanged()
+    QuillHeaderBar(
+      onTapList: { showingNotesList = true },
+      onTapNewNote: {
         Task {
           let loc = await LocationClient.shared.currentPlace()
           _ = notes.startNewNote(location: loc)
         }
-      } label: {
-        Image(systemName: "square.and.pencil")
-          .font(.title3.weight(.semibold))
-          .foregroundStyle(.white)
-          .frame(width: 36, height: 36)
-          .background(Circle().fill(Color.white.opacity(0.18)))
-          .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
-      }
-      .buttonStyle(.plain)
-      .accessibilityLabel("Start new note")
-
-      Button {
-        UISelectionFeedbackGenerator().selectionChanged()
-        showingSettings = true
-      } label: {
-        Image(systemName: "gearshape")
-          .font(.title3.weight(.semibold))
-          .foregroundStyle(.white)
-          .frame(width: 36, height: 36)
-          .background(
-            Circle().fill(Color.white.opacity(0.18))
-          )
-          .overlay(
-            Circle().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
-          )
-      }
-      .buttonStyle(.plain)
-    }
-    .padding(.horizontal, 20)
-    .padding(.vertical, 12)
-    .background(
-      LinearGradient(
-        colors: [
-          Color(red: 0.25, green: 0.10, blue: 0.45),  // deep purple
-          Color(red: 0.40, green: 0.20, blue: 0.65),  // brighter mid
-          Color(red: 0.30, green: 0.18, blue: 0.55),  // settled bottom
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-      )
-      .ignoresSafeArea(edges: .top)
+      },
+      onTapSettings: { showingSettings = true }
     )
-    .overlay(alignment: .bottom) {
-      Rectangle()
-        .fill(Color.black.opacity(0.25))
-        .frame(height: 0.5)
-    }
-    .shadow(color: .purple.opacity(0.2), radius: 8, y: 4)
-  }
-
-  private var logoMark: some View {
-    Image("Feather")
-      .resizable()
-      .renderingMode(.template)
-      .aspectRatio(contentMode: .fit)
-      .foregroundStyle(.white)
-      .frame(width: 34, height: 34)
-      .shadow(color: .black.opacity(0.25), radius: 3, y: 2)
   }
 
   // MARK: - Active-note strip
 
-  /// Compact row under the header bar showing which note new recordings
-  /// will append to, with controls to start a fresh note or browse all
-  /// notes. Sits on the light gradient background (not the dark header).
+  /// Reusable "you're working on this note" strip. Lives in
+  /// `Views/QuillActiveNoteStrip.swift` so attached screens render
+  /// identical context framing without duplicating the metadata logic.
   private var activeNoteStrip: some View {
-    HStack(spacing: 10) {
-      Image(systemName: "note.text")
-        .font(.subheadline)
-        .foregroundStyle(.purple)
-
-      Button(action: tapRenameTitle) {
-        VStack(alignment: .leading, spacing: 1) {
-          HStack(spacing: 4) {
-            Text(notes.activeNote?.displayTitle ?? "No active note")
-              .font(.subheadline.weight(.semibold))
-              .lineLimit(1)
-              .foregroundStyle(.primary)
-            if notes.activeNote != nil {
-              Image(systemName: "pencil")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-          }
-          Text(activeNoteSubtitle)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
-      }
-      .buttonStyle(.plain)
-      .disabled(notes.activeNote == nil)
-      .accessibilityLabel("Rename active note")
-
-      Spacer()
-
-    }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 10)
-    .background(
-      Rectangle()
-        .fill(.ultraThinMaterial)
+    QuillActiveNoteStrip(
+      activeNote: notes.activeNote,
+      onTapRename: tapRenameTitle,
+      // Live timer + red dot when actively recording. Hidden during
+      // post-recording phases (transcribing, AI, action parsing) so
+      // the strip falls back to its normal metadata footprint.
+      recordingElapsed: vm.phase == .recording ? vm.elapsedSeconds : nil
     )
-    .overlay(alignment: .bottom) {
-      Rectangle()
-        .fill(Color.primary.opacity(0.06))
-        .frame(height: 0.5)
-    }
-  }
-
-  private var activeNoteSubtitle: String {
-    if let note = notes.activeNote {
-      var parts: [String] = []
-      if let place = note.location?.placeName {
-        parts.append(place)
-      }
-      parts.append("Updated \(note.updatedAt.quillRelativeFormatted().lowercased())")
-      parts.append("\(note.wordCount) words")
-      return parts.joined(separator: " · ")
-    }
-    return "Tap record to start your first note"
   }
 
   // MARK: - Append-on-done
@@ -687,66 +709,75 @@ struct ContentView: View {
   // MARK: - Background
 
   private var backgroundGradient: some View {
-    LinearGradient(
-      colors: [
-        Color.purple.opacity(0.08),
-        Color.blue.opacity(0.04),
-        Color(.systemBackground),
-      ],
-      startPoint: .topLeading,
-      endPoint: .bottomTrailing
-    )
+    // Solid #f4f1f8 (the app's lavender base) per the spec — no
+    // gradient. Keeps the surface uniform so card borders and shadows
+    // read consistently regardless of where they sit on the screen.
+    Color(red: 0.957, green: 0.945, blue: 0.973)
   }
 
   // MARK: - Mode chips
 
-  @ViewBuilder
-  private var modeChipRow: some View {
-    ScrollView(.horizontal, showsIndicators: false) {
-      HStack(spacing: 8) {
-        // Built-in modes first — stable ordering, always present.
-        ForEach(AIProcessingMode.allCases, id: \.rawValue) { mode in
-          let selected = currentSelection == .builtIn(mode)
-          ModeChip(
-            mode: mode,
-            isSelected: selected,
-            action: {
-              UISelectionFeedbackGenerator().selectionChanged()
-              aiModeRaw = AIModeSelection.builtIn(mode).rawValue
-            }
-          )
-        }
-
-        // User-authored custom modes after the built-ins. The chip
-        // style mirrors `ModeChip` so the row reads as one cohesive
-        // picker rather than two sections.
-        ForEach(customModes) { mode in
-          let selected = currentSelection == .custom(mode.id)
-          CustomModeChip(
-            mode: mode,
-            isSelected: selected,
-            action: {
-              UISelectionFeedbackGenerator().selectionChanged()
-              aiModeRaw = AIModeSelection.custom(mode.id).rawValue
-            }
-          )
-        }
-      }
-      .padding(.horizontal, 4)
-    }
-    .scrollClipDisabled()
+  /// Built-in modes the user has hidden via Settings → AI Modes.
+  /// `.off` is never hideable — the user always needs a way back to
+  /// Raw, even if every other mode is disabled.
+  private var disabledBuiltInModes: Set<AIProcessingMode> {
+    BuiltInModeVisibility.decode(disabledBuiltInModesData)
   }
 
-  // MARK: - Bottom action cluster (mic + camera FABs)
+  /// Built-in modes to render in the pill row — always includes `.off`,
+  /// then any other mode the user hasn't toggled off.
+  private var visibleBuiltInModes: [AIProcessingMode] {
+    AIProcessingMode.allCases.filter { mode in
+      mode == .off || !disabledBuiltInModes.contains(mode)
+    }
+  }
+
+  // MARK: - Bottom action cluster (single + button → expands to a
+  // vertical fan of dictate / photo / action, with the mode dropdown
+  // floating in next to dictate)
 
   private var bottomActionCluster: some View {
     VStack(alignment: .trailing, spacing: 12) {
       statusCard
-      HStack(spacing: 14) {
-        cameraFAB
-        micFAB
-      }
+      QuillFABCluster(
+        vm: vm,
+        modeSelectionRaw: $aiModeRaw,
+        customModes: customModes,
+        visibleBuiltInModes: visibleBuiltInModes,
+        hasAPIKey: aiProvider.hasAPIKey,
+        onTapCamera: tapAddPhoto,
+        onTapAction: {
+          Task {
+            await vm.toggleActionRecording(
+              model: selectedModel,
+              provider: aiProvider
+            )
+          }
+        },
+        onTapMic: {
+          Task {
+            await vm.toggleRecording(
+              model: selectedModel,
+              mode: aiMode,
+              provider: aiProvider,
+              voiceCommandsEnabled: voiceCommandsEnabled,
+              customSystemPrompt: micCustomSystemPrompt
+            )
+          }
+        },
+        onRequestSettings: { showingSettings = true }
+      )
     }
+  }
+
+  /// Resolved custom prompt to thread through `vm.toggleRecording`. Pulls
+  /// the current selection's prompt only when it's a custom mode — built-
+  /// in modes use their own `mode.systemPrompt` via `aiMode`.
+  private var micCustomSystemPrompt: String? {
+    if case .custom = currentSelection {
+      return currentSelection.resolveSystemPrompt(customModes: customModes)
+    }
+    return nil
   }
 
   /// Compact floating status card rendered above the FAB cluster. Only
@@ -754,6 +785,14 @@ struct ContentView: View {
   /// notes underneath stay clean.
   @ViewBuilder
   private var statusCard: some View {
+    if showOfflineQueuedBanner {
+      statusPill(
+        "Saved offline — will retry when online",
+        icon: "wifi.exclamationmark",
+        tint: .orange
+      )
+      .transition(.move(edge: .trailing).combined(with: .opacity))
+    }
     if let aiError = vm.aiErrorMessage, vm.phase == .done {
       statusPill(aiError, icon: "exclamationmark.triangle", tint: .orange)
     }
@@ -766,32 +805,17 @@ struct ContentView: View {
     }
     switch vm.phase {
     case .recording:
-      VStack(alignment: .trailing, spacing: 6) {
-        Text(formatElapsed(vm.elapsedSeconds))
-          .font(.system(size: 18, weight: .semibold, design: .rounded))
-          .foregroundStyle(.red)
-          .monospacedDigit()
-        if !vm.livePartial.isEmpty {
-          Text(vm.livePartial)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .italic()
-            .multilineTextAlignment(.trailing)
-            .lineLimit(3)
-            .frame(maxWidth: 260, alignment: .trailing)
-            .animation(.easeOut(duration: 0.15), value: vm.livePartial)
-            .transition(.opacity)
-        }
-      }
-      .padding(10)
-      .background(
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(.ultraThinMaterial)
-      )
+      // No status pill while recording — the new layout owns the
+      // recording UI: live transcript card in the canvas, waveform
+      // pinned to the bottom, timer in the active-note strip. The
+      // legacy floating timer pill that lived here is gone.
+      EmptyView()
     case .requestingPermission:
       statusPill("Requesting mic…", icon: "mic.slash", tint: .secondary)
     case .transcribing:
       statusPill("Transcribing…", icon: "waveform", tint: .blue)
+    case .actionParsing:
+      statusPill("Parsing action…", icon: "bolt.fill", tint: .orange)
     case .aiProcessing:
       statusPill("Enhancing with \(aiProvider.displayName)…", icon: "sparkles", tint: .purple)
     case .error(let msg):
@@ -814,109 +838,6 @@ struct ContentView: View {
       .frame(maxWidth: 260, alignment: .trailing)
   }
 
-  /// Shared size for both FABs so they read as a matched pair.
-  private static let fabSize: CGFloat = 72
-  /// Outer bounding box — large enough to hold the main circle plus its
-  /// soft shadow/glow without spilling into its sibling or stretching
-  /// the cluster layout.
-  private static let fabSlot: CGFloat = 88
-
-  private var cameraFAB: some View {
-    Button(action: tapAddPhoto) {
-      Circle()
-        .fill(
-          LinearGradient(
-            colors: [Color.purple, Color.purple.opacity(0.82)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-          )
-        )
-        .frame(width: Self.fabSize, height: Self.fabSize)
-        .overlay(
-          Image(systemName: "camera.fill")
-            .font(.system(size: 26, weight: .semibold))
-            .foregroundStyle(.white)
-        )
-        .shadow(color: Color.purple.opacity(0.35), radius: 8, y: 4)
-        .frame(width: Self.fabSlot, height: Self.fabSlot)
-    }
-    .buttonStyle(.plain)
-    .accessibilityLabel("Add photo to note")
-  }
-
-  @ViewBuilder
-  private var micFAB: some View {
-    let isRecording = vm.phase == .recording
-    let isBusy: Bool = {
-      switch vm.phase {
-      case .transcribing, .aiProcessing, .requestingPermission: return true
-      default: return false
-      }
-    }()
-    let tint: Color = isRecording ? .red : (aiMode == .off ? .blue : .purple)
-    let level = CGFloat(vm.meterLevel)
-
-    Button {
-      Task {
-        await vm.toggleRecording(
-          model: selectedModel,
-          mode: aiMode,
-          provider: aiProvider,
-          voiceCommandsEnabled: voiceCommandsEnabled,
-          customSystemPrompt: currentSelection.resolveSystemPrompt(customModes: customModes).flatMap { _ in
-            // Only pass a custom prompt when the selection IS a custom mode;
-            // built-in selections use their own `mode.systemPrompt` via `aiMode`.
-            if case .custom = currentSelection {
-              return currentSelection.resolveSystemPrompt(customModes: customModes)
-            }
-            return nil
-          }
-        )
-      }
-    } label: {
-      ZStack {
-        // Audio-reactive halo, only while recording. Contained inside
-        // the fabSlot via the outer `.frame` so the blur doesn't
-        // scatter across the cluster when it scales.
-        if isRecording {
-          Circle()
-            .fill(tint.opacity(0.3 + level * 0.4))
-            .frame(width: Self.fabSize + 8, height: Self.fabSize + 8)
-            .blur(radius: 6)
-            .scaleEffect(1.0 + level * 0.15)
-            .animation(.easeInOut(duration: 0.18), value: level)
-        }
-
-        Circle()
-          .fill(
-            LinearGradient(
-              colors: [tint, tint.opacity(0.75)],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
-            )
-          )
-          .frame(width: Self.fabSize, height: Self.fabSize)
-          .shadow(color: tint.opacity(0.4), radius: 8, y: 4)
-          .scaleEffect(isRecording ? 1.0 + level * 0.08 : 1.0)
-          .animation(.easeInOut(duration: 0.15), value: level)
-
-        if isBusy {
-          ProgressView().controlSize(.regular).tint(.white)
-        } else {
-          Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-            .font(.system(size: 28, weight: .medium))
-            .foregroundStyle(.white)
-            .symbolEffect(.bounce, value: isRecording)
-        }
-      }
-      .frame(width: Self.fabSlot, height: Self.fabSlot)
-      .compositingGroup()
-    }
-    .buttonStyle(.plain)
-    .disabled(isBusy)
-    .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
-  }
-
   private func formatElapsed(_ seconds: TimeInterval) -> String {
     let m = Int(seconds) / 60
     let s = Int(seconds) % 60
@@ -935,10 +856,36 @@ struct ContentView: View {
   /// content is always in view.
   @ViewBuilder
   private var resultArea: some View {
-    if let note = notes.activeNote, !note.body.isEmpty {
+    // Three states drive what shows in the canvas region:
+    // 1. Recording — full-bleed live transcript card + waveform card
+    //    + 1-2 line caption. Replaces whatever was there.
+    // 2. Active note with content — the existing note canvas (the
+    //    user's actual writing).
+    // 3. No active note (or empty active note) — pre-recording
+    //    landing: feather mic + "Ready when you are." + example chips
+    //    that map to the FAB cluster.
+    if vm.phase == .recording {
+      QuillRecordingTranscriptCard(transcript: recordingTranscript)
+        .transition(.opacity)
+    } else if let note = notes.activeNote, !note.body.isEmpty {
       noteCanvas(for: note)
         .transition(.opacity.combined(with: .move(edge: .bottom)))
+    } else {
+      QuillEmptyHome()
+        .transition(.opacity)
     }
+  }
+
+  /// What QuillRecordingState should show in its big card. Falls back
+  /// to whatever the active note already had (if any) appended with
+  /// the recognizer's running partial — so a long ongoing note stays
+  /// visible while the user adds more.
+  private var recordingTranscript: String {
+    let partial = vm.livePartial.trimmingCharacters(in: .whitespacesAndNewlines)
+    let existing = notes.activeNote?.body.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if existing.isEmpty { return partial }
+    if partial.isEmpty { return existing }
+    return existing + "\n\n" + partial
   }
 
   private func noteCanvas(for note: Note) -> some View {
@@ -1147,6 +1094,12 @@ struct ContentView: View {
     .accessibilityLabel(accessibilityLabel)
   }
 
+  /// Shared toolbar-glyph styling for the note-card actions: 26pt round
+  /// affordance with a near-transparent tint fill so the buttons read
+  /// as a connected toolbar rather than three competing color blocks.
+  /// The glyph itself carries the only saturated color.
+  private static let noteToolbarGlyphSize: CGFloat = 26
+
   private func noteShareMenu(for note: Note, tint: Color) -> some View {
     let text = NoteContent.stripPhotos(from: note.body)
     let hasPhotos = note.photoCount > 0
@@ -1168,12 +1121,7 @@ struct ContentView: View {
         )
       }
     } label: {
-      Image(systemName: "square.and.arrow.up")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(tint)
-        .frame(width: 30, height: 30)
-        .background(Circle().fill(tint.opacity(0.14)))
-        .contentShape(Circle())
+      noteToolbarGlyph(systemName: "square.and.arrow.up", tint: tint)
     }
     .disabled(isBuildingPDF)
     .opacity(isBuildingPDF ? 0.5 : 1.0)
@@ -1185,12 +1133,7 @@ struct ContentView: View {
       UISelectionFeedbackGenerator().selectionChanged()
       pendingDeleteNoteID = note.id
     } label: {
-      Image(systemName: "trash")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.red)
-        .frame(width: 30, height: 30)
-        .background(Circle().fill(Color.red.opacity(0.14)))
-        .contentShape(Circle())
+      noteToolbarGlyph(systemName: "trash", tint: .red)
     }
     .buttonStyle(.plain)
     .accessibilityLabel("Delete note")
@@ -1202,17 +1145,33 @@ struct ContentView: View {
     return Button {
       copyToClipboard(text)
     } label: {
-      Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
-        .contentTransition(.symbolEffect(.replace))
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(effectiveTint)
-        .frame(width: 30, height: 30)
-        .background(Circle().fill(effectiveTint.opacity(0.14)))
-        .contentShape(Circle())
+      noteToolbarGlyph(
+        systemName: showCopied ? "checkmark" : "doc.on.doc",
+        tint: effectiveTint,
+        contentTransition: .symbolEffect(.replace)
+      )
     }
     .buttonStyle(.plain)
     .animation(.easeInOut(duration: 0.2), value: showCopied)
     .accessibilityLabel(showCopied ? "Copied" : "Copy note text")
+  }
+
+  /// 26pt round glyph with a faint tint backdrop. Used by every note-
+  /// card toolbar button so they share the same restrained visual
+  /// weight — the glyph reads, the affordance recedes.
+  @ViewBuilder
+  private func noteToolbarGlyph(
+    systemName: String,
+    tint: Color,
+    contentTransition: ContentTransition = .identity
+  ) -> some View {
+    Image(systemName: systemName)
+      .contentTransition(contentTransition)
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(tint)
+      .frame(width: Self.noteToolbarGlyphSize, height: Self.noteToolbarGlyphSize)
+      .background(Circle().fill(tint.opacity(0.06)))
+      .contentShape(Circle())
   }
 
   private func copyToClipboard(_ text: String) {
@@ -1266,35 +1225,17 @@ private struct ModeChip: View {
   var body: some View {
     Button(action: action) {
       HStack(spacing: 6) {
-        Image(systemName: iconName)
+        Image(systemName: mode.iosIconName)
           .font(.caption.weight(.semibold))
-        Text(mode == .off ? "Raw" : mode.displayName)
+        Text(mode.iosDisplayName)
           .font(.subheadline.weight(.medium))
       }
       .padding(.horizontal, 14)
       .padding(.vertical, 8)
-      .background(
-        Capsule()
-          .fill(isSelected ? tint : Color.secondary.opacity(0.12))
-      )
+      .modifier(ModeChipBackground(isSelected: isSelected, tint: tint))
       .foregroundStyle(isSelected ? Color.white : Color.primary)
-      .overlay(
-        Capsule()
-          .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.2), lineWidth: 1)
-      )
     }
     .buttonStyle(.plain)
-  }
-
-  private var iconName: String {
-    switch mode {
-    case .off: "waveform"
-    case .clean: "sparkles"
-    case .email: "envelope"
-    case .notes: "list.bullet"
-    case .message: "bubble.left"
-    case .code: "chevron.left.forwardslash.chevron.right"
-    }
   }
 
   private var tint: Color {
@@ -1323,17 +1264,57 @@ private struct CustomModeChip: View {
       }
       .padding(.horizontal, 14)
       .padding(.vertical, 8)
-      .background(
-        Capsule()
-          .fill(isSelected ? Color.purple : Color.secondary.opacity(0.12))
-      )
+      .modifier(ModeChipBackground(isSelected: isSelected, tint: .purple))
       .foregroundStyle(isSelected ? Color.white : Color.primary)
-      .overlay(
-        Capsule()
-          .stroke(isSelected ? Color.clear : Color.secondary.opacity(0.2), lineWidth: 1)
-      )
     }
     .buttonStyle(.plain)
+  }
+}
+
+/// Shared chip background for built-in `ModeChip` and `CustomModeChip`.
+/// On the selected state, layers (1) the tinted capsule fill,
+/// (2) a top-edge inset white highlight that reads as a slight bevel,
+/// and (3) a purple drop-glow so the chip lifts off the row.
+/// Unselected stays restrained — light gray fill + 1pt outline.
+private struct ModeChipBackground: ViewModifier {
+  let isSelected: Bool
+  let tint: Color
+
+  func body(content: Content) -> some View {
+    content
+      .background {
+        ZStack {
+          Capsule()
+            .fill(isSelected ? tint : Color.secondary.opacity(0.12))
+          if isSelected {
+            // Inset white glow at the top edge — fades from 35% white
+            // at the top to nothing by the midpoint. Reads as a
+            // pressed-button highlight rather than a border.
+            Capsule()
+              .strokeBorder(
+                LinearGradient(
+                  colors: [.white.opacity(0.35), .clear],
+                  startPoint: .top,
+                  endPoint: .bottom
+                ),
+                lineWidth: 1
+              )
+          }
+        }
+      }
+      .overlay {
+        if !isSelected {
+          Capsule().stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        }
+      }
+      // Drop glow only on selected — soft purple-tint shadow that
+      // signals brand-pressed state, distinct from the light gray
+      // inactive chips.
+      .shadow(
+        color: isSelected ? tint.opacity(0.40) : .clear,
+        radius: 6,
+        y: 2
+      )
   }
 }
 

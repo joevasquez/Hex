@@ -17,6 +17,10 @@ struct SettingsView: View {
   @AppStorage(QuillIOSSettingsKey.voiceCommandsEnabled) private var voiceCommandsEnabled: Bool = QuillIOSSettingsKey.defaultVoiceCommandsEnabled
   @AppStorage(CustomAIModesStorage.userDefaultsKey) private var customModesData: Data = Data()
   @AppStorage(IntegrationConnectionStore.userDefaultsKey) private var integrationData: Data = Data()
+  @AppStorage(ErrorMonitoringSettings.crashReportingEnabledKey) private var crashReportingEnabled: Bool = false
+  /// JSON-encoded set of built-in AI modes the user has hidden from
+  /// the home-screen pill bar. Defaults to empty (everything visible).
+  @AppStorage(QuillIOSSettingsKey.disabledBuiltInModes) private var disabledBuiltInModesData: Data = Data()
 
   private var customModeCountLabel: String {
     let count = CustomAIModesStorage.decode(customModesData).count
@@ -30,9 +34,28 @@ struct SettingsView: View {
     return "\(count)/\(cap)"
   }
 
+  /// Trailing accessory for the Google Account row. Shows the cached email
+  /// when signed in (truncated by lineLimit at the call site), or a
+  /// "Connect" hint when signed out — mirrors how `integrationCountLabel`
+  /// previews state without requiring a tap.
+  private var googleAccountLabel: String {
+    if IOSGoogleOAuthClient.isAuthorized() {
+      return UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) ?? "Connected"
+    }
+    return "Connect"
+  }
+
   @State private var apiKeyText: String = ""
   @State private var isAPIKeyVisible: Bool = false
   @State private var apiKeySaved: Bool = false
+
+  /// Refreshed on view appear via `.task`. Async-only state because
+  /// `ActionQueueManager.snapshot()` lives on an actor.
+  @State private var offlineQueueCount: Int = 0
+
+  private var offlineQueueLabel: String {
+    offlineQueueCount == 0 ? "Empty" : "\(offlineQueueCount) pending"
+  }
 
   private let availableModels: [(id: String, name: String, size: String)] = [
     ("openai_whisper-tiny.en", "Whisper Tiny (English)", "~75 MB"),
@@ -94,9 +117,25 @@ struct SettingsView: View {
             .disabled(apiKeyText.isEmpty)
 
           if apiKeySaved {
-            Label("Saved to Keychain", systemImage: "checkmark.circle.fill")
-              .foregroundStyle(.green)
-              .font(.caption)
+            // Persistent success row — green checkmark disc + label —
+            // so the saved state is a real, anchored UI element rather
+            // than a transient flash floating in the white space.
+            HStack(spacing: 10) {
+              Image(systemName: "checkmark")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.green))
+              VStack(alignment: .leading, spacing: 1) {
+                Text("Saved to Keychain")
+                  .font(.subheadline.weight(.semibold))
+                Text("Encrypted on this device. Never sent except in API calls.")
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+              }
+              Spacer()
+            }
+            .padding(.vertical, 4)
           }
         } header: {
           Text("\(currentProvider.displayName) API Key")
@@ -113,6 +152,21 @@ struct SettingsView: View {
         }
 
         Section {
+          // Built-in mode toggles — turning one off hides it from the
+          // pill bar on the main screen so the user only sees the
+          // transformations they actually use.
+          ForEach(builtInToggleableModes, id: \.rawValue) { mode in
+            Toggle(isOn: builtInModeBinding(for: mode)) {
+              VStack(alignment: .leading, spacing: 1) {
+                Label(mode.displayName, systemImage: builtInModeIcon(mode))
+                  .font(.body)
+                Text(builtInModeDescription(mode))
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+            }
+          }
+
           NavigationLink {
             CustomModesView()
           } label: {
@@ -127,7 +181,26 @@ struct SettingsView: View {
         } header: {
           Text("AI Modes")
         } footer: {
-          Text("Create your own transformations — \"Clinical note\", \"VC update\", \"Code review email\" — and pick them from the mode row on the main screen.")
+          Text("Toggle the built-in modes you want in the pill bar on the home screen. Custom Modes lets you author your own — \"Clinical note\", \"VC update\", etc.")
+        }
+
+        Section {
+          NavigationLink {
+            GoogleAccountView()
+          } label: {
+            HStack {
+              Label("Google Account", systemImage: "globe")
+              Spacer()
+              Text(googleAccountLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+          }
+        } header: {
+          Text("Accounts")
+        } footer: {
+          Text("Sign in once to enable Gmail and Google Calendar in Action mode. Optional — you can do this later or skip it entirely.")
         }
 
         Section {
@@ -146,6 +219,39 @@ struct SettingsView: View {
           Text("Productivity")
         } footer: {
           Text("Send dictations into Todoist, Apple Reminders, Notion, Things, Slack, Linear. Free plan includes \(IntegrationLimits.freeTierMaxConnections) — Pro unlocks all.")
+        }
+
+        Section {
+          NavigationLink {
+            OfflineQueueView()
+          } label: {
+            HStack {
+              Label("Offline Queue", systemImage: "tray.full")
+              Spacer()
+              Text(offlineQueueLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+        } header: {
+          Text("Offline")
+        } footer: {
+          Text("Actions you take while offline are saved here and retried automatically when you're back online.")
+        }
+
+        Section {
+          Toggle(isOn: $crashReportingEnabled) {
+            Label("Send anonymous crash reports", systemImage: "ladybug")
+          }
+          .onChange(of: crashReportingEnabled) { _, _ in
+            // Re-run configure() so SentrySDK starts/stops to match the
+            // new flag without a relaunch.
+            ErrorMonitoring.configure()
+          }
+        } header: {
+          Text("Privacy")
+        } footer: {
+          Text("Off by default. When on, Quill sends crash stack traces and OS version to Sentry — never your transcripts, audio, notes, photos, or contacts.")
         }
 
         Section {
@@ -181,6 +287,9 @@ struct SettingsView: View {
         apiKeySaved = false
         loadKey()
       }
+      .task {
+        offlineQueueCount = await ActionQueueManager.shared.snapshot().count
+      }
     }
   }
 
@@ -215,6 +324,63 @@ struct SettingsView: View {
     let (roundTrip, readStatus) = KeychainStore.read(account: keychainKey)
     print("SettingsView.saveKey: save=\(status) readBack=\(readStatus) roundTripLen=\(roundTrip?.count ?? -1)")
     apiKeySaved = (status == errSecSuccess) && (roundTrip == key)
+  }
+
+  // MARK: - AI Modes (built-in visibility)
+
+  /// Built-in modes that can be toggled off — every case except `.off`
+  /// (Raw is always available so the user can dictate without AI even
+  /// when every other mode is hidden).
+  private var builtInToggleableModes: [AIProcessingMode] {
+    AIProcessingMode.allCases.filter { $0 != .off }
+  }
+
+  /// Per-mode binding — flipping it adds/removes the mode from the
+  /// disabled set and persists. The pill bar in `ContentView` reads
+  /// the same key and filters on render.
+  private func builtInModeBinding(for mode: AIProcessingMode) -> Binding<Bool> {
+    Binding(
+      get: {
+        !BuiltInModeVisibility.decode(disabledBuiltInModesData).contains(mode)
+      },
+      set: { isOn in
+        var disabled = BuiltInModeVisibility.decode(disabledBuiltInModesData)
+        if isOn {
+          disabled.remove(mode)
+        } else {
+          disabled.insert(mode)
+        }
+        disabledBuiltInModesData = BuiltInModeVisibility.encode(disabled)
+      }
+    )
+  }
+
+  private func builtInModeIcon(_ mode: AIProcessingMode) -> String {
+    switch mode {
+    case .off: return "waveform"
+    case .clean: return "sparkles"
+    case .email: return "envelope"
+    case .notes: return "list.bullet"
+    case .message: return "bubble.left"
+    case .code: return "chevron.left.forwardslash.chevron.right"
+    }
+  }
+
+  private func builtInModeDescription(_ mode: AIProcessingMode) -> String {
+    switch mode {
+    case .off:
+      return "Direct transcript — no AI processing."
+    case .clean:
+      return "Tighten phrasing, drop filler words, fix punctuation."
+    case .email:
+      return "Polished email body — greeting, sign-off, neutral tone."
+    case .notes:
+      return "Bullets and headings for meeting notes / structured capture."
+    case .message:
+      return "Casual tone for chat — Slack, iMessage, Discord."
+    case .code:
+      return "Tighten technical writing for code review or commit messages."
+    }
   }
 }
 

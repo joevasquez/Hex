@@ -19,6 +19,18 @@ struct ActionConfirmationFeature {
     var selectedList: String = ""
     /// Todoist priority (1-4). 0 means "no priority set".
     var editablePriority: Int = 0
+    /// Calendar event start (for DatePicker).
+    var editableStartDate: Date = Date()
+    /// Calendar event end (for DatePicker).
+    var editableEndDate: Date = Date().addingTimeInterval(3600)
+    /// Calendar event attendees (comma-separated emails).
+    var editableAttendees: String = ""
+    /// Gmail draft recipient.
+    var editableRecipient: String = ""
+    /// Gmail draft subject line.
+    var editableSubject: String = ""
+    /// Gmail draft body text.
+    var editableBody: String = ""
     var isExecuting: Bool = false
     var error: String?
 
@@ -31,6 +43,24 @@ struct ActionConfirmationFeature {
       self.editableNotes = intent.notes ?? ""
       self.selectedList = intent.listName ?? ""
       self.editablePriority = intent.priority ?? 0
+      self.editableAttendees = intent.attendees?.joined(separator: ", ") ?? ""
+      self.editableRecipient = intent.recipient ?? ""
+      self.editableSubject = intent.subject ?? intent.title
+      self.editableBody = intent.notes ?? ""
+
+      let parsedStart = (intent.dueDate.flatMap { parseDateAndTime($0) }) ?? Self.defaultEventStart()
+      let minutes = intent.duration ?? 60
+      self.editableStartDate = parsedStart
+      self.editableEndDate = parsedStart.addingTimeInterval(Double(minutes) * 60)
+    }
+
+    /// Next top-of-the-hour from now (e.g. 2:43pm → 3:00pm).
+    private static func defaultEventStart() -> Date {
+      let cal = Calendar.current
+      let now = Date()
+      let components = cal.dateComponents([.year, .month, .day, .hour], from: now)
+      let topOfHour = cal.date(from: components) ?? now
+      return cal.date(byAdding: .hour, value: 1, to: topOfHour) ?? now
     }
   }
 
@@ -44,10 +74,18 @@ struct ActionConfirmationFeature {
     case cancel
     case executionSucceeded(String)
     case executionFailed(String)
+    /// Network failure was caught and the intent was persisted to the
+    /// offline queue. Treated as a soft success: panel dismisses, no
+    /// scary error UI — the queue will retry on reconnect.
+    case executionQueued
   }
 
   @Dependency(\.reminders) var reminders
   @Dependency(\.todoist) var todoist
+  @Dependency(\.calendarAdapter) var calendarAdapter
+  @Dependency(\.gmailAdapter) var gmailAdapter
+  @Dependency(\.googleCalendarAdapter) var googleCalendarAdapter
+  @Dependency(\.googleOAuth) var googleOAuth
   @Dependency(\.keychain) var keychain
   @Dependency(\.soundEffects) var soundEffect
 
@@ -60,17 +98,19 @@ struct ActionConfirmationFeature {
 
       case .onAppear:
         let initialIntegration = state.selectedIntegration
-        return .run { send in
-          // Resolve which integrations are actually usable right now.
+        return .run { [googleOAuth] send in
           let connected = IntegrationConnectionStore.decode(
             UserDefaults.standard.data(forKey: IntegrationConnectionStore.userDefaultsKey)
           )
-          // Apple Reminders is always available (no setup required).
-          var available: [Integration.Identifier] = [.appleReminders]
+          var available: [Integration.Identifier] = [.appleReminders, .calendar]
           if connected.contains(.todoist),
              let token = await keychain.read(KeychainKey.todoistAPIToken),
              !token.isEmpty {
             available.append(.todoist)
+          }
+          if await googleOAuth.isAuthorized() {
+            if connected.contains(.googleCalendar) { available.append(.googleCalendar) }
+            if connected.contains(.gmail) { available.append(.gmail) }
           }
           await send(.integrationsLoaded(available))
           await send(.selectedIntegrationChanged(initialIntegration))
@@ -86,14 +126,19 @@ struct ActionConfirmationFeature {
 
       case let .selectedIntegrationChanged(integration):
         state.selectedIntegration = integration
-        // Refresh the list/project picker to match the chosen integration.
-        return .run { [todoist, reminders] send in
+        return .run { [todoist, reminders, calendarAdapter, googleCalendarAdapter] send in
           let lists: [String]
           switch integration {
           case .todoist:
             lists = await todoist.fetchProjects().map(\.name)
           case .appleReminders:
             lists = await reminders.fetchLists()
+          case .calendar:
+            lists = await calendarAdapter.fetchCalendars()
+          case .googleCalendar:
+            lists = await googleCalendarAdapter.fetchCalendars().map(\.name)
+          case .gmail:
+            lists = []
           default:
             lists = []
           }
@@ -117,8 +162,24 @@ struct ActionConfirmationFeature {
         finalIntent.notes = state.editableNotes.isEmpty ? nil : state.editableNotes
         finalIntent.listName = state.selectedList.isEmpty ? nil : state.selectedList
         finalIntent.priority = state.editablePriority == 0 ? nil : state.editablePriority
+        if state.selectedIntegration == .calendar || state.selectedIntegration == .googleCalendar {
+          finalIntent.actionType = .createEvent
+          finalIntent.startDate = state.editableStartDate
+          finalIntent.endDate = state.editableEndDate
+          let emails = state.editableAttendees
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+          finalIntent.attendees = emails.isEmpty ? nil : emails
+        }
+        if state.selectedIntegration == .gmail {
+          finalIntent.actionType = .createDraft
+          finalIntent.recipient = state.editableRecipient.isEmpty ? nil : state.editableRecipient
+          finalIntent.subject = state.editableSubject.isEmpty ? nil : state.editableSubject
+          finalIntent.notes = state.editableBody.isEmpty ? nil : state.editableBody
+        }
 
-        return .run { [todoist, reminders, integration = state.selectedIntegration] send in
+        return .run { [todoist, reminders, calendarAdapter, gmailAdapter, googleCalendarAdapter, integration = state.selectedIntegration] send in
           do {
             let id: String
             switch integration {
@@ -126,13 +187,28 @@ struct ActionConfirmationFeature {
               id = try await todoist.createTask(finalIntent)
             case .appleReminders:
               id = try await reminders.createReminder(finalIntent)
+            case .calendar:
+              id = try await calendarAdapter.createEvent(finalIntent)
+            case .gmail:
+              id = try await gmailAdapter.createDraft(finalIntent)
+            case .googleCalendar:
+              id = try await googleCalendarAdapter.createEvent(finalIntent)
             default:
               throw ActionConfirmationError.unsupportedIntegration(integration)
             }
             await send(.executionSucceeded(id))
           } catch {
             actionLogger.error("Action execution failed for \(integration.rawValue, privacy: .public): \(error.localizedDescription)")
-            await send(.executionFailed(error.localizedDescription))
+            // Transient network errors → save to the offline queue so the
+            // user's intent isn't lost. Permission / auth / validation
+            // errors fall through to the existing failure path so the
+            // user can fix them in the panel.
+            if QueueableErrorClassifier.isQueueable(error) {
+              await ActionQueueManager.shared.enqueue(finalIntent, lastError: error.localizedDescription)
+              await send(.executionQueued)
+            } else {
+              await send(.executionFailed(error.localizedDescription))
+            }
           }
         }
 
@@ -140,6 +216,18 @@ struct ActionConfirmationFeature {
         state.isExecuting = false
         soundEffect.play(.pasteTranscript)
         actionLogger.info("Action executed successfully")
+        return .run { _ in
+          NotificationCenter.default.post(name: .actionConfirmationExecuted, object: nil)
+        }
+
+      case .executionQueued:
+        state.isExecuting = false
+        soundEffect.play(.pasteTranscript)
+        actionLogger.info("Action queued for offline retry")
+        // Soft-success: dismiss the panel like normal completion. The
+        // queue manager will replay on reconnect; if it ultimately
+        // exhausts retries, we surface that via a Settings UI row
+        // (see Phase 4) rather than re-presenting the panel.
         return .run { _ in
           NotificationCenter.default.post(name: .actionConfirmationExecuted, object: nil)
         }

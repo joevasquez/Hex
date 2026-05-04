@@ -39,6 +39,7 @@ struct OnboardingView: View {
     case welcome
     case permissions
     case ai
+    case googleSignIn
     case done
   }
 
@@ -61,6 +62,11 @@ struct OnboardingView: View {
         case .ai:
           AIKeyStep(
             store: store,
+            onContinue: { advance() },
+            onSkip: { advance() }
+          )
+        case .googleSignIn:
+          GoogleSignInStep(
             onContinue: { advance() },
             onSkip: { advance() }
           )
@@ -420,7 +426,110 @@ private struct AIKeyStep: View {
   }
 }
 
-// MARK: - Step 4: Done
+// MARK: - Step 4: Google sign-in
+
+private struct GoogleSignInStep: View {
+  let onContinue: () -> Void
+  let onSkip: () -> Void
+
+  @Dependency(\.googleOAuth) private var googleOAuth
+
+  @State private var isAuthenticating = false
+  @State private var connectedEmail: String?
+  @State private var errorMessage: String?
+
+  var body: some View {
+    VStack(spacing: 16) {
+      stepHeader(
+        title: "Connect Google (optional)",
+        subtitle: "Lets you say \"email Mike about the deck\" or \"add a meeting to my Google Calendar\" — Quill drafts the email or creates the event for you. You can do this later from Settings."
+      )
+
+      Spacer().frame(height: 8)
+
+      // Connected state — single source of truth for the UI: if we
+      // know an email, we're connected. The .task below seeds this
+      // from the cached value (and falls back to a fresh userinfo
+      // fetch) so the user doesn't see a flash of "Sign in" if they
+      // already authorized in a prior run.
+      if let connectedEmail {
+        VStack(spacing: 6) {
+          Label {
+            Text("Connected as \(connectedEmail)")
+              .font(.subheadline.weight(.semibold))
+              .foregroundStyle(.white)
+          } icon: {
+            Image(systemName: "checkmark.circle.fill")
+              .foregroundStyle(.green)
+          }
+          Text("Gmail drafts and Google Calendar events are now available in Action mode.")
+            .font(.caption)
+            .foregroundStyle(.white.opacity(0.75))
+            .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 40)
+        .transition(.opacity)
+      }
+
+      if let errorMessage {
+        Text(errorMessage)
+          .font(.caption)
+          .foregroundStyle(.orange)
+          .multilineTextAlignment(.center)
+          .padding(.horizontal, 40)
+      }
+
+      Spacer()
+
+      VStack(spacing: 10) {
+        if connectedEmail != nil {
+          OnboardingButton("Continue", action: onContinue)
+        } else {
+          OnboardingButton(
+            isAuthenticating ? "Opening browser…" : "Sign in with Google",
+            isDisabled: isAuthenticating,
+            action: signIn
+          )
+          Button("I'll add it later", action: onSkip)
+            .buttonStyle(.plain)
+            .font(.subheadline)
+            .foregroundStyle(.white.opacity(0.85))
+        }
+      }
+      .padding(.horizontal, 32)
+      .padding(.bottom, 80)
+    }
+    .task {
+      // Hydrate from cache so a returning user who already signed in
+      // sees the connected state immediately. If the keychain says
+      // we're authorized but the cache is empty, do a one-shot
+      // userinfo fetch to populate it.
+      if let cached = UserDefaults.standard.string(forKey: GoogleOAuthClient.googleAccountEmailDefaultsKey) {
+        connectedEmail = cached
+      } else if await googleOAuth.isAuthorized() {
+        connectedEmail = await googleOAuth.fetchUserEmail()
+      }
+    }
+  }
+
+  private func signIn() {
+    isAuthenticating = true
+    errorMessage = nil
+
+    Task {
+      do {
+        _ = try await googleOAuth.authorize(scopes: GoogleOAuthClient.defaultScopes)
+        let email = await googleOAuth.fetchUserEmail()
+        withAnimation { connectedEmail = email ?? "your Google account" }
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+      isAuthenticating = false
+    }
+  }
+}
+
+// MARK: - Step 5: Done
 
 private struct DoneStep: View {
   let onFinish: () -> Void

@@ -7,6 +7,7 @@
 //  now; actual OAuth flows and send adapters land in a follow-up.
 //
 
+import EventKit
 import HexCore
 import SwiftUI
 
@@ -15,6 +16,8 @@ struct IntegrationsView: View {
   @AppStorage(IntegrationConnectionStore.userDefaultsKey) private var connectedData: Data = Data()
 
   @State private var showingComingSoon = false
+  @State private var showingTodoistSheet = false
+  @State private var showingGoogleSheet = false
   @State private var pending: Integration?
 
   var body: some View {
@@ -33,7 +36,7 @@ struct IntegrationsView: View {
           Text("Dictate naturally — \"remind me Friday to review the launch deck\" becomes a Todoist task. Free plan includes \(IntegrationLimits.freeTierMaxConnections) integrations; Pro unlocks all.")
         }
 
-        if connectedCount >= IntegrationLimits.freeTierMaxConnections,
+        if connectedFreeCount >= IntegrationLimits.freeTierMaxConnections,
            Integration.all.contains(where: { !isConnected($0) && !$0.requiresPro }) {
           Section {
             HStack(alignment: .top, spacing: 8) {
@@ -57,6 +60,26 @@ struct IntegrationsView: View {
       } message: { integration in
         Text("\(integration.name) ships in a follow-up. We've saved your intent — you'll be prompted to finish the connection when it lands.")
       }
+      .sheet(isPresented: $showingTodoistSheet) {
+        TodoistTokenSheetIOS(onConnected: {
+          var current = connected
+          current.insert(.todoist)
+          connectedData = IntegrationConnectionStore.encode(current)
+        })
+      }
+      .sheet(isPresented: $showingGoogleSheet) {
+        // Reuse the dedicated Google Account screen rather than a
+        // bespoke OAuth sheet — keeps sign-in/disconnect logic in one
+        // place. NavigationStack so the inner view's title shows.
+        NavigationStack {
+          GoogleAccountView()
+            .toolbar {
+              ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") { showingGoogleSheet = false }
+              }
+            }
+        }
+      }
     }
   }
 
@@ -66,26 +89,91 @@ struct IntegrationsView: View {
 
   private var connectedCount: Int { connected.count }
 
+  /// The free-tier cap only counts non-Pro integrations toward the
+  /// quota — Pro integrations (Gmail, Google Calendar, etc.) come in
+  /// through their own OAuth path and would otherwise squeeze out the
+  /// free three. Without this filter, signing into Google fills the
+  /// cap and disables every Connect button below.
+  private var connectedFreeCount: Int {
+    connected.filter { id in
+      Integration.all.first(where: { $0.identifier == id })?.requiresPro == false
+    }.count
+  }
+
   private func isConnected(_ integration: Integration) -> Bool {
-    connected.contains(integration.identifier)
+    // For Gmail / Google Calendar, OAuth keychain state wins over the
+    // UserDefaults integration set. This keeps the row in sync even if
+    // the user signed in before the connection-state backfill landed
+    // (tokens present, store entry missing).
+    if integration.identifier == .gmail || integration.identifier == .googleCalendar {
+      return IOSGoogleOAuthClient.isAuthorized()
+    }
+    return connected.contains(integration.identifier)
   }
 
   private func canConnect(_ integration: Integration) -> Bool {
     if isConnected(integration) { return true }
     if integration.requiresPro { return false }
-    return connectedCount < IntegrationLimits.freeTierMaxConnections
+    return connectedFreeCount < IntegrationLimits.freeTierMaxConnections
   }
 
   private func toggle(_ integration: Integration) {
     var current = connected
-    if current.contains(integration.identifier) {
+
+    // Use the same is-connected logic as the row UI so taps always
+    // match what the button is showing. Falls through to the OAuth
+    // check for Gmail/GCal.
+    if isConnected(integration) {
       current.remove(integration.identifier)
-    } else {
-      current.insert(integration.identifier)
+      // Disconnecting either Gmail or Google Calendar revokes both
+      // (single sign-in covers both scopes). Mirrors the macOS toggle.
+      if integration.identifier == .gmail || integration.identifier == .googleCalendar {
+        current.remove(.gmail)
+        current.remove(.googleCalendar)
+        IOSGoogleOAuthClient.disconnect()
+      }
+      connectedData = IntegrationConnectionStore.encode(current)
+      if integration.identifier == .todoist {
+        KeychainStore.delete(account: KeychainKey.todoistAPIToken)
+      }
+      UISelectionFeedbackGenerator().selectionChanged()
+      return
+    }
+
+    switch integration.identifier {
+    case .appleReminders:
+      Task {
+        let store = EKEventStore()
+        let granted = (try? await store.requestFullAccessToReminders()) ?? false
+        if granted {
+          var updated = connected
+          updated.insert(.appleReminders)
+          connectedData = IntegrationConnectionStore.encode(updated)
+        }
+      }
+    case .calendar:
+      Task {
+        let store = EKEventStore()
+        let granted = (try? await store.requestFullAccessToEvents()) ?? false
+        if granted {
+          var updated = connected
+          updated.insert(.calendar)
+          connectedData = IntegrationConnectionStore.encode(updated)
+        }
+      }
+    case .todoist:
+      showingTodoistSheet = true
+    case .gmail, .googleCalendar:
+      // One sign-in covers both — present the shared Google Account
+      // sheet. The sheet itself writes both identifiers into the store
+      // on success.
+      showingGoogleSheet = true
+    default:
       pending = integration
       showingComingSoon = true
+      current.insert(integration.identifier)
+      connectedData = IntegrationConnectionStore.encode(current)
     }
-    connectedData = IntegrationConnectionStore.encode(current)
     UISelectionFeedbackGenerator().selectionChanged()
   }
 }

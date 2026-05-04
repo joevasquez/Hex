@@ -98,6 +98,10 @@ struct TranscriptionFeature {
     // Action mode
     case actionIntentParsed(ActionIntent)
     case actionParsingFailed(String)
+    /// Network failure caught during LLM parsing; the raw transcript was
+    /// persisted to the offline queue and will be re-parsed + executed
+    /// when connectivity returns. Treated as a soft success.
+    case actionParsingQueued
     case actionExecuted
     case actionCancelled
     case presentActionConfirmation(ActionIntent)
@@ -242,9 +246,9 @@ struct TranscriptionFeature {
 
       case let .inlineEditApplied(pending):
         state.pendingEditResult = pending
-        // Auto-accept after 8 seconds if the user doesn't act.
+        // Auto-accept after 10 seconds if the user doesn't act.
         return .run { send in
-          try? await Task.sleep(for: .seconds(8))
+          try? await Task.sleep(for: .seconds(10))
           await send(.inlineEditAccept)
         }
         .cancellable(id: CancelID.editAcceptanceTimer, cancelInFlight: true)
@@ -256,19 +260,16 @@ struct TranscriptionFeature {
       case .inlineEditUndo:
         guard let pending = state.pendingEditResult else { return .none }
         state.pendingEditResult = nil
-        let original = pending.original
         let bundleID = pending.sourceAppBundleID
         return .merge(
           .cancel(id: CancelID.editAcceptanceTimer),
-          .run { [inlineEdit, pasteboard] _ in
-            // Re-select and replace with the original text via AX.
-            // If AX fails, paste the original so the user can
-            // manually undo.
-            let restored = await inlineEdit.replaceSelection(original)
-            if !restored {
-              transcriptionFeatureLogger.warning("Inline edit undo: AX restore failed; pasting original")
-              await pasteboard.paste(original, bundleID)
-            }
+          .run { [inlineEdit] _ in
+            // Send Cmd+Z to the source app. The previous "select and
+            // replace with original" approach failed because the
+            // cursor is collapsed at the end of the edited text after
+            // AX-set or paste — calling replaceSelection again just
+            // inserted the original text *after* the edit.
+            await inlineEdit.undoLastEdit(bundleID)
             soundEffect.play(.cancel)
           }
         )
@@ -286,6 +287,15 @@ struct TranscriptionFeature {
           await pasteboard.paste(rawText, bundleID)
           soundEffect.play(.pasteTranscript)
         }
+
+      case .actionParsingQueued:
+        // Same audio cue as a successful paste — confirms something
+        // happened. The menu bar status item picks up the pending count
+        // automatically (see HexAppDelegate.refreshStatusItemTooltip).
+        transcriptionFeatureLogger.info("Action parsing queued for offline retry")
+        soundEffect.play(.pasteTranscript)
+        NotificationCenter.default.post(name: .actionConfirmationExecuted, object: nil)
+        return .none
 
       case .actionExecuted:
         state.pendingAction = nil
@@ -826,17 +836,15 @@ private extension TranscriptionFeature {
           await send(.aiProcessingFinished)
 
           let replaced = await inlineEdit.replaceSelection(edited)
-          if replaced {
-            // Surface accept/undo pill in the HUD.
-            await send(.inlineEditApplied(PendingEditResult(
-              original: selection,
-              edited: edited,
-              sourceAppBundleID: sourceAppBundleID
-            )))
-          } else {
+          if !replaced {
             transcriptionFeatureLogger.warning("Inline edit: AX replace failed; falling back to paste")
             await pasteboard.paste(edited, sourceAppBundleID)
           }
+          await send(.inlineEditApplied(PendingEditResult(
+            original: selection,
+            edited: edited,
+            sourceAppBundleID: sourceAppBundleID
+          )))
           soundEffect.play(.pasteTranscript)
           try? FileManager.default.removeItem(at: audioURL)
         } catch {
@@ -861,7 +869,20 @@ private extension TranscriptionFeature {
         } catch {
           transcriptionFeatureLogger.error("Action parsing failed: \(error.localizedDescription)")
           await send(.aiProcessingFinished)
-          await send(.actionParsingFailed(modifiedResult))
+          // Transient network errors → queue the raw transcript so the
+          // offline queue can re-parse + execute when we're back online.
+          // Permanent errors (auth, malformed JSON) fall through to the
+          // existing paste-fallback path.
+          if QueueableErrorClassifier.isQueueable(error) {
+            await ActionQueueManager.shared.enqueueTranscript(
+              modifiedResult,
+              provider: aiProvider,
+              lastError: error.localizedDescription
+            )
+            await send(.actionParsingQueued)
+          } else {
+            await send(.actionParsingFailed(modifiedResult))
+          }
         }
         try? FileManager.default.removeItem(at: audioURL)
       }
@@ -1104,6 +1125,7 @@ struct TranscriptionView: View {
       editMessage: store.editNeedsSelectionMessage,
       pendingEditResult: store.pendingEditResult,
       onCycleMode: { store.send(.cycleMode) },
+      onEditAccept: { store.send(.inlineEditAccept) },
       onEditUndo: { store.send(.inlineEditUndo) }
     )
     .frame(maxWidth: .infinity, maxHeight: .infinity)

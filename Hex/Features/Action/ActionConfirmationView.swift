@@ -71,31 +71,47 @@ struct ActionConfirmationView: View {
   @ViewBuilder
   private var form: some View {
     VStack(spacing: 10) {
-      field("Title", text: $store.editableTitle)
-      field("Due", text: $store.editableDueDate, placeholder: "e.g. Friday, tomorrow")
+      if store.selectedIntegration == .gmail {
+        field("To", text: $store.editableRecipient, placeholder: "e.g. mike@acme.com")
+        field("Subject", text: $store.editableSubject)
+        field("Body", text: $store.editableBody, placeholder: "Draft body text")
+      } else {
+        field("Title", text: $store.editableTitle)
 
-      if !store.availableLists.isEmpty {
-        HStack {
-          Text(listLabel)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.white.opacity(0.5))
-            .frame(width: 50, alignment: .leading)
-          Picker("", selection: $store.selectedList) {
-            ForEach(store.availableLists, id: \.self) { list in
-              Text(list).tag(list)
-            }
-          }
-          .labelsHidden()
-          .pickerStyle(.menu)
-          .tint(.white.opacity(0.8))
+        if store.selectedIntegration == .calendar || store.selectedIntegration == .googleCalendar {
+          datePickerRow("Start", selection: tiedStartDateBinding)
+          datePickerRow("End", selection: $store.editableEndDate)
+        } else {
+          field("Due", text: $store.editableDueDate, placeholder: "e.g. Friday, tomorrow")
         }
-      }
 
-      if store.selectedIntegration == .todoist {
-        priorityPicker
-      }
+        if !store.availableLists.isEmpty {
+          HStack {
+            Text(listLabel)
+              .font(.system(size: 11, weight: .medium))
+              .foregroundStyle(.white.opacity(0.5))
+              .frame(width: 50, alignment: .leading)
+            Picker("", selection: $store.selectedList) {
+              ForEach(store.availableLists, id: \.self) { list in
+                Text(list).tag(list)
+              }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .tint(.white.opacity(0.8))
+          }
+        }
 
-      field(notesLabel, text: $store.editableNotes, placeholder: "Optional")
+        if store.selectedIntegration == .todoist {
+          priorityPicker
+        }
+
+        if store.selectedIntegration == .calendar || store.selectedIntegration == .googleCalendar {
+          field("Attendees", text: $store.editableAttendees, placeholder: "e.g. john@acme.com, sarah@acme.com")
+        }
+
+        field("Notes", text: $store.editableNotes, placeholder: "Optional")
+      }
 
       if let error = store.error {
         Text(error)
@@ -109,11 +125,39 @@ struct ActionConfirmationView: View {
   }
 
   private var listLabel: String {
-    store.selectedIntegration == .todoist ? "Project" : "List"
+    switch store.selectedIntegration {
+    case .todoist: "Project"
+    case .calendar, .googleCalendar: "Calendar"
+    default: "List"
+    }
   }
 
-  private var notesLabel: String {
-    store.selectedIntegration == .todoist ? "Notes" : "Notes"
+  private func datePickerRow(_ label: String, selection: Binding<Date>) -> some View {
+    HStack {
+      Text(label)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.white.opacity(0.5))
+        .frame(width: 50, alignment: .leading)
+      DatePicker("", selection: selection, displayedComponents: [.date, .hourAndMinute])
+        .labelsHidden()
+        .datePickerStyle(.compact)
+        .tint(.white.opacity(0.8))
+      Spacer(minLength: 0)
+    }
+  }
+
+  /// Shifts `editableEndDate` by the same delta when start changes, so the
+  /// user-chosen duration is preserved as they pick a new start. Independent
+  /// edits to End remain untied.
+  private var tiedStartDateBinding: Binding<Date> {
+    Binding(
+      get: { store.editableStartDate },
+      set: { newStart in
+        let delta = newStart.timeIntervalSince(store.editableStartDate)
+        store.editableEndDate = store.editableEndDate.addingTimeInterval(delta)
+        store.editableStartDate = newStart
+      }
+    )
   }
 
   private var priorityPicker: some View {
@@ -197,14 +241,27 @@ struct ActionConfirmationView: View {
         .background(Capsule().fill(.green.opacity(0.7)))
       }
       .buttonStyle(.plain)
-      .disabled(store.editableTitle.isEmpty || store.isExecuting)
+      .disabled(executeDisabled)
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
   }
 
+  private var executeDisabled: Bool {
+    if store.isExecuting { return true }
+    if store.selectedIntegration == .gmail {
+      return store.editableSubject.isEmpty
+    }
+    return store.editableTitle.isEmpty
+  }
+
   private var executeLabel: String {
-    store.selectedIntegration == .todoist ? "Add Task" : "Create"
+    switch store.selectedIntegration {
+    case .todoist: "Add Task"
+    case .calendar, .googleCalendar: "Add Event"
+    case .gmail: "Save Draft"
+    default: "Create"
+    }
   }
 
   // MARK: - Integration display helpers

@@ -22,6 +22,8 @@
 	<string>Quill needs accessibility access to monitor keyboard events for hotkey detection and read surrounding text for AI context.</string>
 	<key>NSInputMonitoringUsageDescription</key>
 	<string>Quill needs Input Monitoring permission so your global hotkey works in every app.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Quill creates calendar events from your voice commands in Action mode.</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>Quill creates reminders from your voice commands in Action mode.</string>
 </dict>

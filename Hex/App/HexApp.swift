@@ -51,6 +51,13 @@ struct HexApp: App {
             // Copy last transcript to clipboard
             MenuBarCopyLastTranscriptButton()
 
+            // Hidden unless the offline queue has items waiting. When
+            // shown, tapping opens Settings → General which contains
+            // the OfflineQueueSectionView for inspection / retry.
+            MenuBarPendingActionsButton {
+                appDelegate.presentSettingsView()
+            }
+
             Button("Settings...") {
                 appDelegate.presentSettingsView()
             }.keyboardShortcut(",")

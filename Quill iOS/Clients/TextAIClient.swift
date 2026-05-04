@@ -69,11 +69,25 @@ enum TextAIClient {
     HexLog.aiProcessing.info("TextAIClient: processing \(text.count, privacy: .public) chars via \(provider.displayName, privacy: .public) mode=\(modeLabel, privacy: .public)")
 
     let result: String
-    switch provider {
-    case .anthropic:
-      result = try await callAnthropic(text: text, systemPrompt: systemPrompt, apiKey: key)
-    case .openAI:
-      result = try await callOpenAI(text: text, systemPrompt: systemPrompt, apiKey: key)
+    do {
+      switch provider {
+      case .anthropic:
+        result = try await callAnthropic(text: text, systemPrompt: systemPrompt, apiKey: key)
+      case .openAI:
+        result = try await callOpenAI(text: text, systemPrompt: systemPrompt, apiKey: key)
+      }
+    } catch {
+      // Capture LLM call failures (network / API / decoding) for crash
+      // reporting; re-throw so the caller's fallback-to-raw-transcript
+      // behavior is preserved.
+      captureError(
+        error,
+        context: ErrorContext.feature("ai")
+          .tag("platform", "ios")
+          .tag("provider", provider.rawValue)
+          .tag("mode", customSystemPrompt == nil ? mode.rawValue : "custom")
+      )
+      throw error
     }
     HexLog.aiProcessing.info("TextAIClient: response \(result.count, privacy: .public) chars")
 

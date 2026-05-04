@@ -41,24 +41,37 @@ extension AIProcessingClient: DependencyKey {
         let enrichedPrompt = buildPrompt(basePrompt: basePrompt, context: context)
 
         let response: String
-        switch provider {
-        case .openAI:
-          guard let apiKey = await keychain.read(KeychainKey.openAIAPIKey),
-                !apiKey.isEmpty
-          else {
-            aiLogger.warning("OpenAI API key not configured; skipping AI processing")
-            return text
-          }
-          response = try await callOpenAI(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
+        do {
+          switch provider {
+          case .openAI:
+            guard let apiKey = await keychain.read(KeychainKey.openAIAPIKey),
+                  !apiKey.isEmpty
+            else {
+              aiLogger.warning("OpenAI API key not configured; skipping AI processing")
+              return text
+            }
+            response = try await callOpenAI(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
 
-        case .anthropic:
-          guard let apiKey = await keychain.read(KeychainKey.anthropicAPIKey),
-                !apiKey.isEmpty
-          else {
-            aiLogger.warning("Anthropic API key not configured; skipping AI processing")
-            return text
+          case .anthropic:
+            guard let apiKey = await keychain.read(KeychainKey.anthropicAPIKey),
+                  !apiKey.isEmpty
+            else {
+              aiLogger.warning("Anthropic API key not configured; skipping AI processing")
+              return text
+            }
+            response = try await callAnthropic(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
           }
-          response = try await callAnthropic(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
+        } catch {
+          // Capture LLM call failures (network / API / decoding) so we
+          // can see real-world failure modes. Re-throw so existing
+          // fallback-to-raw-transcript behavior at call sites is intact.
+          captureError(
+            error,
+            context: ErrorContext.feature("ai")
+              .tag("provider", provider.rawValue)
+              .tag("mode", customSystemPrompt == nil ? mode.rawValue : "custom")
+          )
+          throw error
         }
 
         // Safety net: if the model still treated the transcript as a

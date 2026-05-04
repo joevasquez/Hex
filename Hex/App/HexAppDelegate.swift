@@ -20,6 +20,22 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		DiagnosticsLogging.bootstrapIfNeeded()
 		// Ensure Parakeet/FluidAudio caches live under Application Support, not ~/.cache
 		configureLocalCaches()
+		// Install the live error monitoring provider before any other code
+		// can throw — captures during launch get reported. Sentry itself
+		// stays inert until the user opts in via Settings → General.
+		ErrorMonitoring.installLiveService(SentryErrorMonitoring())
+		ErrorMonitoring.configure()
+		// Install the offline action queue executor + parser + start
+		// observing connectivity. The parser handles raw transcripts queued
+		// when the LLM was unreachable; the executor handles already-parsed
+		// intents queued when an integration adapter (Gmail, GCal, Todoist)
+		// failed transiently.
+		Task {
+			await ActionQueueManager.shared.install(
+				executor: SystemActionQueueExecutor(),
+				parser: SystemActionQueueParser()
+			)
+		}
 		if isTesting {
 			appLogger.debug("Running in testing mode")
 			return
@@ -220,6 +236,8 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		actionPanel?.orderOut(nil)
 		actionPanel = nil
 	}
+
+	// MARK: - App lifecycle
 
 	func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows _: Bool) -> Bool {
 		presentSettingsView()

@@ -33,6 +33,7 @@ struct OnboardingView: View {
     case welcome
     case permissions
     case ai
+    case googleSignIn
     case firstNote
   }
 
@@ -47,6 +48,7 @@ struct OnboardingView: View {
         case .welcome:    WelcomeStep(onContinue: { advance() })
         case .permissions: PermissionsStep(onContinue: { advance() })
         case .ai:          AIKeyStep(onContinue: { advance() }, onSkip: { advance() })
+        case .googleSignIn: GoogleSignInStep(onContinue: { advance() }, onSkip: { advance() })
         case .firstNote:   FirstNoteStep(onFinish: complete)
         }
       }
@@ -427,7 +429,114 @@ private struct AIKeyStep: View {
   }
 }
 
-// MARK: - Step 4: First note
+// MARK: - Step 4: Google sign-in
+
+private struct GoogleSignInStep: View {
+  let onContinue: () -> Void
+  let onSkip: () -> Void
+
+  @State private var isAuthenticating = false
+  @State private var connectedEmail: String?
+  @State private var errorMessage: String?
+
+  /// Mirror of the integration-connection set so successful sign-in here
+  /// flips Gmail + Google Calendar to "Connected" in the IntegrationsView
+  /// without requiring the user to re-toggle them.
+  @AppStorage(IntegrationConnectionStore.userDefaultsKey)
+  private var connectedData: Data = Data()
+
+  var body: some View {
+    VStack(spacing: 16) {
+      stepHeader(
+        title: "Connect Google (optional)",
+        subtitle: "Lets you say \"email Mike about the deck\" or \"add a meeting to my Google Calendar\" — Quill drafts the email or creates the event for you. You can do this later from Settings."
+      )
+
+      Spacer().frame(height: 8)
+
+      // Same hydration pattern as the macOS sibling: prefer the cached
+      // email so a returning user sees connected state immediately,
+      // fall back to a userinfo fetch only if cache is empty.
+      if let connectedEmail {
+        VStack(spacing: 6) {
+          Label {
+            Text("Connected as \(connectedEmail)")
+              .font(.subheadline.weight(.semibold))
+              .foregroundStyle(.white)
+          } icon: {
+            Image(systemName: "checkmark.circle.fill")
+              .foregroundStyle(.green)
+          }
+          Text("Gmail drafts and Google Calendar events are now available in Action mode.")
+            .font(.caption)
+            .foregroundStyle(.white.opacity(0.75))
+            .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 8)
+        .transition(.opacity)
+      }
+
+      if let errorMessage {
+        Text(errorMessage)
+          .font(.caption)
+          .foregroundStyle(.orange)
+          .multilineTextAlignment(.center)
+      }
+
+      Spacer()
+
+      VStack(spacing: 10) {
+        if connectedEmail != nil {
+          OnboardingButton("Continue", action: onContinue)
+        } else {
+          OnboardingButton(
+            isAuthenticating ? "Opening Safari…" : "Sign in with Google",
+            isDisabled: isAuthenticating,
+            action: signIn
+          )
+          Button("I'll add it later", action: onSkip)
+            .font(.subheadline)
+            .foregroundStyle(.white.opacity(0.85))
+        }
+      }
+      .padding(.horizontal, 24)
+      .padding(.bottom, 80)
+    }
+    .padding(.horizontal, 24)
+    .task {
+      if let cached = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) {
+        connectedEmail = cached
+      } else if IOSGoogleOAuthClient.isAuthorized() {
+        connectedEmail = await IOSGoogleOAuthClient.fetchUserEmail()
+      }
+    }
+  }
+
+  private func signIn() {
+    isAuthenticating = true
+    errorMessage = nil
+
+    Task {
+      do {
+        _ = try await IOSGoogleOAuthClient.authorize()
+        let email = await IOSGoogleOAuthClient.fetchUserEmail()
+        // Single sign-in connects both Google services — mirror the
+        // macOS GoogleOAuthSheet behavior so IntegrationsView and the
+        // Action confirmation dropdown reflect reality.
+        var current = IntegrationConnectionStore.decode(connectedData)
+        current.insert(.gmail)
+        current.insert(.googleCalendar)
+        connectedData = IntegrationConnectionStore.encode(current)
+        withAnimation { connectedEmail = email ?? "your Google account" }
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+      isAuthenticating = false
+    }
+  }
+}
+
+// MARK: - Step 5: First note
 
 private struct FirstNoteStep: View {
   let onFinish: () -> Void

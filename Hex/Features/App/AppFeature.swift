@@ -375,16 +375,16 @@ private struct SidebarModeToggle: View {
         } label: {
           Text(option.title)
             .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-            .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.72))
+            .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.78))
             .lineLimit(1)
             .minimumScaleFactor(0.9)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+            .padding(.vertical, 7)
             .background {
               if isSelected {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                   .fill(Color.accentColor)
-                  .shadow(color: Color.accentColor.opacity(0.25), radius: 3, y: 1)
+                  .shadow(color: Color.accentColor.opacity(0.25), radius: 5, y: 2)
                   .matchedGeometryEffect(id: "thumb", in: thumbNamespace)
               }
             }
@@ -396,7 +396,7 @@ private struct SidebarModeToggle: View {
     .padding(2)
     .background(
       RoundedRectangle(cornerRadius: 9, style: .continuous)
-        .fill(Color.primary.opacity(0.07))
+        .fill(Color.primary.opacity(0.08))
     )
     .frame(maxWidth: .infinity)
   }
@@ -436,8 +436,8 @@ struct AppView: View {
           }
         )
         .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.top, 16)
+        .padding(.bottom, 12)
 
         // Sub-tabs — only meaningful in Settings mode. We render
         // an empty placeholder in History mode so the sidebar
@@ -466,6 +466,7 @@ struct AppView: View {
           .padding(.bottom, 16)
         }
       }
+      .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 280)
     } detail: {
       switch store.state.activeTab {
       case .general:
@@ -536,6 +537,8 @@ struct AppView: View {
       store.send(.setActiveTab(tab))
     } label: {
       Label(label, systemImage: icon)
+        .symbolRenderingMode(.hierarchical)
+        .font(.system(size: 13))
     }
     .buttonStyle(.plain)
     .tag(tab)

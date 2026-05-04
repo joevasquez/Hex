@@ -18,7 +18,10 @@ struct NoteTextView: View {
   let text: String
   var font: Font = .body
   var textColor: Color = .primary
-  var bulletColor: Color = .secondary
+  /// Default bullet color is `#2a1f3d` — a deep aubergine that holds
+  /// contrast against lavender card backgrounds without dragging the
+  /// eye away from the body text.
+  var bulletColor: Color = Color(red: 0.165, green: 0.122, blue: 0.239)
   var headingColor: Color? = nil
 
   var body: some View {
@@ -48,7 +51,10 @@ struct NoteTextView: View {
         .font(font.weight(.bold))
         .foregroundStyle(headingColor ?? textColor)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
+        // 16pt top margin separates a heading from the prior block —
+        // gives the section rhythm the deliberate beat the prose
+        // version asks for, instead of running paragraphs together.
+        .padding(.top, 16)
     } else if let bullet = matchBullet(trimmed) {
       HStack(alignment: .firstTextBaseline, spacing: 8) {
         Text("•")

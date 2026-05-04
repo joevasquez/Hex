@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.8.0
+
+### Minor Changes
+
+- c9c12db: iOS: AI analyzes each attached photo — summary, key details, and transcribed text land as a card under the photo and in PDF exports
+- c9c12db: iOS: add inline photos to notes — tap camera to insert a photo between dictations (groundwork for AI photo summaries)
+- c0c195a: iOS Action mode (Reminders, Calendar, Todoist, Gmail, Google Calendar) with offline queue + waveform recording state + Ready-when-you-are home, Google sign-in via OAuth+PKCE on both platforms, error monitoring infrastructure (opt-in Sentry), keyword search across iOS notes + macOS history, redesigned iOS FAB cluster (single + that fans up to dictate/photo/action), date-parser fix for 'tomorrow morning at 2pm'-style phrasing.
+- 99ea885: iOS: proper bullet/heading rendering, expanded note canvas, delete from main screen
+- d221e9c: Inline voice commands: 'period', 'comma', 'new paragraph', etc. now work mid-sentence (not just as standalone utterances). macOS + iOS; toggleable in Settings.
+- 89a1426: iOS + Mac: Custom AI modes (user-authored prompts), Mac Inline Edit commands (voice-driven in-place editing of selected text), Integrations surface (Todoist/Reminders/Notion/Things/Slack/Linear placeholders), iOS home-screen widget source + setup guide.
+- c9c12db: iOS: editable note titles + export note as PDF (text + inline photos)
+- a1f1329: **Action mode is live.** The third HUD pill (Dictate → Edit → Action) now turns voice commands into real tasks. Speak "Add to Todoist write email to Mike" or "Remind me to review the launch deck on Friday" and a confirmation panel drops down from the menu bar with editable fields — title, due date, list/project, priority — that you can tweak before clicking Create.
+
+  - **Apple Reminders** is built in (no setup; uses EventKit).
+  - **Todoist** is the first third-party adapter — paste your API token in Settings → Integrations → Connect (validates against `/api/v1/projects` before saving to Keychain).
+  - **The LLM picks the integration from voice context** ("to Todoist", "remind me", etc.) and strips the integration phrase from the title. You can override the pick from the panel before submitting.
+  - Per-integration UI: Reminders shows List + Notes; Todoist adds Project + P1–P4 priority.
+
+  **Mode-cycle hotkey.** A second global shortcut (Settings → Recording → Hot Key → Cycle Mode) cycles the HUD pill between Dictate / Edit / Action without triggering a recording.
+
+  **UX polish.**
+
+  - Edit mode now shows a single Undo chip after an inline edit, auto-dismissing after 8s (the Keep button is gone — the edit auto-commits silently).
+  - The Settings/History sidebar toggle now uses your system accent color instead of the old purple.
+  - The volume slider in Settings → General slides out smoothly when Sound Effects is toggled off.
+  - "Highlight text first" chip now fires when you trigger Edit mode without a selection — recording is cancelled instead of pasting your instruction as literal text.
+
+  **Security & store readiness.**
+
+  - Privacy manifests (`PrivacyInfo.xcprivacy`) shipped for both targets — required for App Store submission.
+  - ATS is no longer disabled globally; Quill relies on default macOS HTTPS enforcement.
+  - iOS clients now use `os.log` with `, privacy: .private` annotations everywhere transcript text could leak (was previously logging the first 400 chars of every API response via `print()`).
+  - AppleScript paste-fallback escaping now handles backslashes in addition to quotes.
+
+### Patch Changes
+
+- 1c545cc: AI post-processing no longer treats the transcript as a conversation — wraps user content in <transcript> tags and falls back to raw text when the model still refuses. Also fixes Email mode emitting a literal "<Your name>" placeholder.
+- 55c777e: macOS: paste reliably lands in the app you were dictating into. Reactivates the source app before pasting, refuses to paste into Quill itself, and always syncs the clipboard to the transcription so manual Cmd+V fallback always gives you what you just said.
+- d221e9c: macOS: fix 'pastes old clipboard instead of transcription' race — bumped clipboard restore delay from 500ms to 1.5s and skip restore if clipboard changed in the interim.
+- c9c12db: Fix iOS keychain read: API keys saved in Settings weren't being found by photo analysis (kSecAttrAccessible shouldn't be in lookup queries)
+- 3afb124: AI post-processing is now strictly cleanup-only — never invents greetings, closings, names, or signatures. Email mode in particular no longer prepends 'Hi,' or appends 'Best,' / 'Thanks,' / a name unless the speaker dictated them.
+- 713b9f7: macOS: fix unreliable paste — AX-insertion now verifies the text actually landed (some Electron / custom inputs silently drop the set), and the whole paste flow checks Accessibility permission upfront so when it's missing the text is left in the clipboard with a clear log message instead of vanishing.
+- 350a124: macOS: never paste the wrong content. Switched primary paste path to Accessibility-based text insertion (bypasses the clipboard entirely), and flipped the clipboard-restore default so we don't race against slow paste handlers. Fixes a bug where a previously-copied API key could be pasted instead of the transcription.
+- da470e2: macOS: fix blank menu bar icon (SF Symbol 'feather' doesn't exist — ship a real template NSImage built from the Feather asset)
+- c0c195a: Settings reorganization: Recording tab is now the comprehensive recording hub (model, mic, hotkeys, during-recording behavior, output, history). General tab slimmed to permissions + sound + app toggles. AI tab restructured into Provider / Default Mode / Behavior subsections. Sidebar gets a min-width and slightly polished pill toggle so Settings/History buttons no longer get crushed at narrow widths.
+- b78f049: Stop priming the sound-effects audio engine when sound effects are disabled so Hex avoids unnecessary background audio activity and sleep assertions (#200).
+
 ## 0.9.0
 
 ### New
@@ -35,8 +82,8 @@
 ### Fixes
 
 - **macOS: paste reliably lands in the right app, every time.** The remaining unreliability — "sometimes my transcription shows up, sometimes I paste my previous clipboard" — traced to three compounding bugs:
-  1. The paste targeted *whichever app was frontmost when transcription finished*, not the app the user was dictating into. If you Cmd-Tabbed away while Whisper or AI post-processing was running (1–3 seconds), the paste landed in the wrong window.
-  2. The Accessibility-insertion path bypasses the clipboard entirely, so if AX landed in the wrong element and you tried to `Cmd+V` manually in your actual target, you pasted whatever was in the clipboard *before* Quill ran (API keys, etc.).
+  1. The paste targeted _whichever app was frontmost when transcription finished_, not the app the user was dictating into. If you Cmd-Tabbed away while Whisper or AI post-processing was running (1–3 seconds), the paste landed in the wrong window.
+  2. The Accessibility-insertion path bypasses the clipboard entirely, so if AX landed in the wrong element and you tried to `Cmd+V` manually in your actual target, you pasted whatever was in the clipboard _before_ Quill ran (API keys, etc.).
   3. Nothing stopped a paste from writing into Quill's own Settings / History window.
 - **Fix:** Quill now remembers which app you started recording in and reactivates it before pasting (with a short settle-time for focus to update), refuses to paste into itself, and after every successful paste syncs the transcription into the clipboard — so manual `Cmd+V` fallback always gives you the dictation, never stale content.
 
@@ -74,11 +121,11 @@
 
 ### New
 
-- **Inline voice commands.** Phrases like `period`, `comma`, `question mark`, `colon`, `semicolon`, `new paragraph`, `new line`, and `full stop` are now converted to punctuation and line breaks *mid-sentence* — not only when spoken alone. So "hello comma world period new paragraph welcome" becomes `Hello, world.\n\nWelcome` before AI post-processing runs. Standalone `undo`, `redo`, and `select all` still trigger the corresponding editor commands. Toggleable under Settings → AI Enhancement → Voice Commands.
+- **Inline voice commands.** Phrases like `period`, `comma`, `question mark`, `colon`, `semicolon`, `new paragraph`, `new line`, and `full stop` are now converted to punctuation and line breaks _mid-sentence_ — not only when spoken alone. So "hello comma world period new paragraph welcome" becomes `Hello, world.\n\nWelcome` before AI post-processing runs. Standalone `undo`, `redo`, and `select all` still trigger the corresponding editor commands. Toggleable under Settings → AI Enhancement → Voice Commands.
 
 ### Fixes
 
-- **Paste reliability.** Fixed a race where releasing the record hotkey in a slow-to-respond app (Chrome, Arc, Slack, Electron apps, first paste after launch) could paste your *previous* clipboard contents instead of the transcription. The clipboard restore now waits 1.5 s instead of 500 ms and skips the restore entirely if anything else has written to the clipboard in the meantime.
+- **Paste reliability.** Fixed a race where releasing the record hotkey in a slow-to-respond app (Chrome, Arc, Slack, Electron apps, first paste after launch) could paste your _previous_ clipboard contents instead of the transcription. The clipboard restore now waits 1.5 s instead of 500 ms and skips the restore entirely if anything else has written to the clipboard in the meantime.
 
 ## 0.8.1
 

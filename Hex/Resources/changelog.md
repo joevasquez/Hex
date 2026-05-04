@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.10.0
+
+### New
+
+- **Action mode (iOS).** The third home-screen button (orange ⚡) brings full Action mode to iOS — five working integrations (Apple Reminders, Apple Calendar, Todoist, Gmail, Google Calendar). Speak "remind me to call Mike Friday" or "schedule a 30-minute standup tomorrow at 9am" and a confirmation sheet lets you tweak title / due date / list / attendees before committing.
+- **Google sign-in (Gmail + Google Calendar).** A single sign-in unlocks both services. macOS and iOS use `ASWebAuthenticationSession` + PKCE against an iOS-type Google Cloud OAuth client — Desktop-type clients have been rejected by Google for custom URI scheme redirects since 2022, and the new flow stores no client secret. Sign in via Settings → Accounts → Google or directly through the integration row.
+- **Offline action queue.** Dictate a voice action while offline (subway, plane, weak Wi-Fi), and the intent (or even the raw transcript when the LLM is unreachable) is persisted to disk and replayed automatically when connectivity returns. Inspect / retry / discard pending items from Settings → Offline (iOS) or Settings → General → Offline Queue (macOS). On macOS, the menu-bar dropdown shows a count when items are pending.
+- **Search across notes (iOS) and transcripts (macOS).** Notes list gets a custom search field that matches title, body, and location. macOS Settings → History gets a `.searchable` field that matches transcript text and source app name (so "slack" finds everything you dictated into Slack).
+- **Anonymous crash reporting (opt-in).** Settings → Privacy → "Send anonymous crash reports" wires up Sentry on both platforms. Off by default — when on, we send stack traces + OS version, never your transcripts, audio, notes, or contacts.
+- **iOS UI overhaul.**
+  - "Ready when you are." pre-recording landing with three example-utterance chips that map by color to the FAB cluster (purple mic / orange bolt / purple camera).
+  - Recording state shows a live-transcript card that auto-scrolls to newest, plus a 32-bar lavender waveform pinned to the bottom of the screen above a single + button.
+  - The three FABs (camera / action / mic) collapse into a single + button that fans up on tap. While recording, the + flips to a red stop button — single-tap to stop.
+  - Mode picker is now a dropdown pill that greys out modes when no AI provider key is configured + alerts the user to add one in Settings.
+  - Notes list rebuilt with a custom purple header band matching the home screen, frosted-circle New + Close buttons, custom search field, and visible rename + delete pills on every row (delete now confirms via alert).
+
+### Fixes
+
+- **"Tomorrow morning at 2pm" parses correctly.** The natural-language date parser previously returned today-at-9am whenever you added a time-of-day qualifier ("morning", "afternoon", "evening", "night") to a today/tomorrow phrase. Now matches via `.contains` instead of strict equality, plus the LLM is coached to drop redundant qualifiers when an explicit time is present. 14 new regression tests pin the behavior.
+- **Free-tier integration cap.** Pro integrations (Gmail, Google Calendar, etc.) no longer count against the 2-integration free-tier limit. Previously, signing into Google immediately filled the cap and disabled every other Connect button.
+- **iOS Google integrations no longer appear "disconnected" after sign-in.** OAuth keychain state is now treated as authoritative for Gmail / Google Calendar; a launch-time backfill repairs the integration set whenever it falls out of sync with the keychain.
+
+### Internal
+
+- New iOS adapters: `IOSRemindersAdapter`, `IOSCalendarAdapter`, `IOSTodoistAdapter`, `IOSGmailAdapter`, `IOSGoogleCalendarAdapter`, `IOSGoogleOAuthClient`, `IOSActionParsingClient`, `IOSSystemActionQueueExecutor`, `IOSActionQueueParser`.
+- New shared HexCore modules: `Errors/` (protocol-based error monitoring), `Offline/` (action queue + retry policy + network monitor), `Logic/ActionSystemPrompt`, `Logic/DateTimeParser`.
+- New iOS UI components in `Quill iOS/Views/`: `QuillHeaderBar`, `QuillActiveNoteStrip`, `QuillFABCluster`, `QuillModeDropdown`, `QuillEmptyHome`, `QuillRecordingState`.
+- macOS `GoogleOAuthClient` rewritten on `ASWebAuthenticationSession` + PKCE; URL-callback routing in `HexAppDelegate` removed (no longer needed).
+
 ## 0.9.0
 
 ### New

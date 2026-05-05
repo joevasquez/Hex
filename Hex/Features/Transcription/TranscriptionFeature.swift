@@ -48,6 +48,16 @@ struct TranscriptionFeature {
     var pendingEditResult: PendingEditResult?
     var pendingAction: ActionIntent?
     var isActionExecuting: Bool = false
+    /// Connected & authenticated integrations available as Action targets.
+    /// Loaded on `.task` and refreshed when the user enters Action mode.
+    var availableActionIntegrations: [Integration.Identifier] = []
+    /// User's hard-locked Action integration. When non-nil, the LLM-picked
+    /// `targetIntegration` is overridden with this value before the
+    /// confirmation panel opens. Toggled from the HUD picker row.
+    var lockedActionIntegration: Integration.Identifier?
+    /// The raw transcript that was sent to the action LLM parser. Carried
+    /// through to the confirmation panel so the "HEARD" section can quote it.
+    var lastActionTranscript: String = ""
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -104,7 +114,14 @@ struct TranscriptionFeature {
     case actionParsingQueued
     case actionExecuted
     case actionCancelled
-    case presentActionConfirmation(ActionIntent)
+    case presentActionConfirmation(ActionIntent, String)
+    case actionIntegrationsLoaded([Integration.Identifier])
+    case toggleActionIntegrationLock(Integration.Identifier)
+    case loadActionIntegrations
+    /// fn+1..fn+9 keyboard toggle. The digit (1-based) selects the
+    /// integration in `availableActionIntegrations` at index `digit - 1`.
+    /// No-op if the digit is out of range or Action mode isn't active.
+    case actionIntegrationKeyboardToggle(Int)
 
     // Model availability
     case modelMissing
@@ -138,6 +155,9 @@ struct TranscriptionFeature {
   @Dependency(\.contextClient) var contextClient
   @Dependency(\.inlineEdit) var inlineEdit
   @Dependency(\.actionParsing) var actionParsing
+  @Dependency(\.speechRecognition) var speechRecognition
+  @Dependency(\.keychain) var keychain
+  @Dependency(\.googleOAuth) var googleOAuth
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -149,10 +169,16 @@ struct TranscriptionFeature {
         // 1) Observing audio meter
         // 2) Monitoring hot key events
         // 3) Priming the recorder for instant startup
+        // 4) Asking for speech-recognition permission so the live preview
+        //    works on the very first recording (silently no-ops if denied)
         return .merge(
           startMeteringEffect(),
           startHotKeyMonitoringEffect(),
-          warmUpRecorderEffect()
+          warmUpRecorderEffect(),
+          .run { [speechRecognition] _ in
+            _ = await speechRecognition.requestAuthorization()
+          },
+          .send(.loadActionIntegrations)
         )
 
       // MARK: - Metering
@@ -210,6 +236,12 @@ struct TranscriptionFeature {
         state.selectedMode = state.selectedMode.next
         let modeName = state.selectedMode.rawValue
         transcriptionFeatureLogger.info("Mode cycled to \(modeName)")
+        // Refresh available integrations whenever the user enters Action
+        // mode — the user may have just signed into Google or connected
+        // Todoist in another window.
+        if state.selectedMode == .action {
+          return .send(.loadActionIntegrations)
+        }
         return .none
 
       // MARK: - Edit Mode
@@ -277,8 +309,16 @@ struct TranscriptionFeature {
       // MARK: - Action Mode
 
       case let .actionIntentParsed(intent):
-        state.pendingAction = intent
-        return .send(.presentActionConfirmation(intent))
+        // Apply hard-lock: if the user pre-selected an integration on the
+        // HUD picker, override whatever the LLM chose so the action lands
+        // in the user's pick regardless of voice phrasing.
+        var resolvedIntent = intent
+        if let locked = state.lockedActionIntegration {
+          resolvedIntent.targetIntegration = locked
+        }
+        state.pendingAction = resolvedIntent
+        let raw = state.lastActionTranscript
+        return .send(.presentActionConfirmation(resolvedIntent, raw))
 
       case let .actionParsingFailed(rawText):
         transcriptionFeatureLogger.warning("Action parsing failed; falling back to paste")
@@ -305,12 +345,58 @@ struct TranscriptionFeature {
         state.pendingAction = nil
         return .none
 
-      case let .presentActionConfirmation(intent):
+      case let .presentActionConfirmation(intent, rawTranscript):
         transcriptionFeatureLogger.info("Posting action confirmation notification for intent: \(intent.title, privacy: .private)")
         return .run { _ in
           await MainActor.run {
-            ActionConfirmationNotification.post(intent: intent)
+            ActionConfirmationNotification.post(intent: intent, rawTranscript: rawTranscript)
           }
+        }
+
+      case let .actionIntegrationsLoaded(integrations):
+        state.availableActionIntegrations = integrations
+        // Drop the lock if the locked integration is no longer available
+        // (e.g. user signed out of Google). Keeps the picker honest.
+        if let locked = state.lockedActionIntegration, !integrations.contains(locked) {
+          state.lockedActionIntegration = nil
+        }
+        return .none
+
+      case let .toggleActionIntegrationLock(id):
+        if state.lockedActionIntegration == id {
+          state.lockedActionIntegration = nil
+        } else {
+          state.lockedActionIntegration = id
+        }
+        return .none
+
+      case let .actionIntegrationKeyboardToggle(digit):
+        // Only honor while in Action mode — otherwise the global tap
+        // would be hijacking fn+digit for users not even using Action.
+        guard state.selectedMode == .action else { return .none }
+        let index = digit - 1
+        guard index >= 0, index < state.availableActionIntegrations.count else {
+          return .none
+        }
+        let id = state.availableActionIntegrations[index]
+        return .send(.toggleActionIntegrationLock(id))
+
+      case .loadActionIntegrations:
+        return .run { [keychain, googleOAuth] send in
+          let connected = IntegrationConnectionStore.decode(
+            UserDefaults.standard.data(forKey: IntegrationConnectionStore.userDefaultsKey)
+          )
+          var available: [Integration.Identifier] = [.appleReminders, .calendar]
+          if connected.contains(.todoist),
+             let token = await keychain.read(KeychainKey.todoistAPIToken),
+             !token.isEmpty {
+            available.append(.todoist)
+          }
+          if await googleOAuth.isAuthorized() {
+            if connected.contains(.googleCalendar) { available.append(.googleCalendar) }
+            if connected.contains(.gmail) { available.append(.gmail) }
+          }
+          await send(.actionIntegrationsLoaded(available))
         }
 
       case .modelMissing:
@@ -540,6 +626,8 @@ private extension TranscriptionFeature {
 
     let contextEnrichmentEnabled = state.hexSettings.contextEnrichmentEnabled && state.hexSettings.aiProcessingEnabled
 
+    let outputLanguage = state.hexSettings.outputLanguage
+
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
       .cancel(id: CancelID.liveTranscription),
@@ -559,12 +647,17 @@ private extension TranscriptionFeature {
 
         await recording.startRecording()
       },
-      // Live transcription is disabled for now — chunked transcription conflicts with
-      // the single-model architecture, causing the model lock to stall the event tap
-      // and freeze keyboard/mouse input. Needs a dedicated lightweight model or
-      // streaming API to work safely.
-      // TODO: Re-enable with a separate model instance or WhisperKit streaming API
-      .none
+      // Live preview via Apple's SFSpeechRecognizer (on-device when supported).
+      // Runs in parallel with the file-based RecordingClient — both consume the
+      // default input device. The authoritative transcript is still produced
+      // by WhisperKit/Parakeet on stop. Stream is closed via CancelID.liveTranscription.
+      .run { [speechRecognition] send in
+        let stream = await speechRecognition.startRecognition(outputLanguage)
+        for await partial in stream {
+          await send(.partialTranscriptUpdated(partial))
+        }
+      }
+      .cancellable(id: CancelID.liveTranscription, cancelInFlight: true)
     )
   }
 
@@ -599,6 +692,7 @@ private extension TranscriptionFeature {
       transcriptionFeatureLogger.notice("Discarding short recording per decision \(String(describing: decision))")
       return .merge(
         .cancel(id: CancelID.liveTranscription),
+        .run { [speechRecognition] _ in await speechRecognition.stopRecognition() },
         .run { _ in
           let url = await recording.stopRecording()
           guard !Task.isCancelled else { return }
@@ -640,6 +734,7 @@ private extension TranscriptionFeature {
 
     let transcriptionEffect: Effect<Action> = .merge(
       .cancel(id: CancelID.liveTranscription),
+      .run { [speechRecognition] _ in await speechRecognition.stopRecognition() },
       .run { [sleepManagement] send in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -861,6 +956,9 @@ private extension TranscriptionFeature {
     // action intent via the LLM, then surface the confirmation panel.
     if state.selectedMode == .action && !modifiedResult.isEmpty {
       state.isAIProcessing = true
+      // Stash the raw transcript so the confirmation panel can quote it
+      // in the "HEARD" section.
+      state.lastActionTranscript = modifiedResult
       return .run { [actionParsing] send in
         do {
           let intent = try await actionParsing.parse(modifiedResult, aiProvider)
@@ -1124,9 +1222,13 @@ struct TranscriptionView: View {
       hotkeyHint: hotkeyHint,
       editMessage: store.editNeedsSelectionMessage,
       pendingEditResult: store.pendingEditResult,
+      partialTranscript: store.partialTranscript,
+      actionIntegrations: store.availableActionIntegrations,
+      lockedActionIntegration: store.lockedActionIntegration,
       onCycleMode: { store.send(.cycleMode) },
       onEditAccept: { store.send(.inlineEditAccept) },
-      onEditUndo: { store.send(.inlineEditUndo) }
+      onEditUndo: { store.send(.inlineEditUndo) },
+      onToggleActionIntegration: { id in store.send(.toggleActionIntegrationLock(id)) }
     )
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .task {

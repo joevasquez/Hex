@@ -189,18 +189,19 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		guard let intent = notification.userInfo?[ActionConfirmationNotification.intentKey] as? ActionIntent else {
 			return
 		}
+		let rawTranscript = (notification.userInfo?[ActionConfirmationNotification.rawTranscriptKey] as? String) ?? ""
 		Task { @MainActor [weak self] in
-			self?.presentActionConfirmation(intent: intent)
+			self?.presentActionConfirmation(intent: intent, rawTranscript: rawTranscript)
 		}
 	}
 
 	@MainActor
-	func presentActionConfirmation(intent: ActionIntent) {
+	func presentActionConfirmation(intent: ActionIntent, rawTranscript: String = "") {
 		HexLog.action.info("Presenting action confirmation panel: \(intent.title, privacy: .private)")
 		dismissActionPanel()
 
 		let confirmationStore = Store(
-			initialState: ActionConfirmationFeature.State(intent: intent)
+			initialState: ActionConfirmationFeature.State(intent: intent, rawTranscript: rawTranscript)
 		) {
 			ActionConfirmationFeature()
 		}

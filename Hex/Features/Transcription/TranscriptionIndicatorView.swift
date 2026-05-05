@@ -7,6 +7,7 @@
 //  and an elapsed timer. Click to cycle modes; drag to reposition.
 //
 
+import HexCore
 import Inject
 import Pow
 import SwiftUI
@@ -68,9 +69,19 @@ struct TranscriptionIndicatorView: View {
   var editMessage: String?
   /// Non-nil after an inline edit lands — drives the ✓/✗ pill.
   var pendingEditResult: TranscriptionFeature.PendingEditResult?
+  /// Live partial transcript from SFSpeechRecognizer. Rendered in a
+  /// fixed-height card below the pill while recording.
+  var partialTranscript: String = ""
+  /// Connected & authenticated integrations, shown as toggleable icon
+  /// buttons under the pill in Action mode. Empty means no row renders.
+  var actionIntegrations: [Integration.Identifier] = []
+  /// User's hard-locked Action integration, if any. The locked button
+  /// shows full tint + a white ring.
+  var lockedActionIntegration: Integration.Identifier?
   var onCycleMode: () -> Void
   var onEditAccept: () -> Void
   var onEditUndo: () -> Void
+  var onToggleActionIntegration: (Integration.Identifier) -> Void = { _ in }
 
   // MARK: Body
 
@@ -81,6 +92,20 @@ struct TranscriptionIndicatorView: View {
         .compositingGroup()
         .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
         .shadow(color: shadowGlow.opacity(0.3), radius: 12)
+
+      // Action mode: row of toggleable integration buttons. Sits between
+      // the pill and the live transcript card so the user can pick a
+      // target before they start dictating.
+      if mode == .action, !actionIntegrations.isEmpty {
+        actionIntegrationRow
+          .transition(.move(edge: .top).combined(with: .opacity))
+      }
+
+      // Live transcript while recording — fixed-height card under the pill.
+      if status == .recording, !partialTranscript.isEmpty {
+        LiveTranscriptCard(text: partialTranscript)
+          .transition(.move(edge: .top).combined(with: .opacity))
+      }
 
       // "Highlight text first" banner
       if let msg = editMessage {
@@ -105,7 +130,42 @@ struct TranscriptionIndicatorView: View {
     .animation(.snappy(duration: 0.25), value: mode)
     .animation(.snappy(duration: 0.25), value: editMessage != nil)
     .animation(.snappy(duration: 0.25), value: pendingEditResult != nil)
+    .animation(.snappy(duration: 0.25), value: partialTranscript.isEmpty)
+    .animation(.snappy(duration: 0.25), value: lockedActionIntegration)
     .enableInjection()
+  }
+
+  // MARK: - Action mode integration picker
+
+  /// Horizontal row of integration chips. Only shown in Action mode when
+  /// at least one integration is connected. Tapping toggles the lock; the
+  /// locked one wins over whatever the LLM picks. Each chip carries a
+  /// `fn + N` shortcut badge so the user can toggle without a click.
+  private var actionIntegrationRow: some View {
+    HStack(spacing: 6) {
+      ForEach(Array(actionIntegrations.prefix(9).enumerated()), id: \.offset) { offset, id in
+        IntegrationToggleButton(
+          identifier: id,
+          isLocked: lockedActionIntegration == id,
+          shortcutNumber: offset + 1,
+          onTap: { onToggleActionIntegration(id) }
+        )
+      }
+    }
+    .padding(.horizontal, 8)
+    .padding(.vertical, 6)
+    .background(
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .fill(.ultraThinMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(.black.opacity(0.25))
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+        )
+    )
   }
 
   // MARK: - Pill Content
@@ -381,6 +441,118 @@ private struct PulseModifier: ViewModifier {
           on = false
         }
       }
+  }
+}
+
+// MARK: - Live transcript card
+
+/// Card under the HUD that shows the live partial transcript from
+/// `SFSpeechRecognizer`. Width is fixed (520pt). Height grows with the
+/// content from one line up to four; beyond that the head truncates so
+/// the most recent words are always visible (`.truncationMode(.head)`).
+/// `reservesSpace: false` lets the card shrink back when the user pauses.
+private struct LiveTranscriptCard: View {
+  let text: String
+
+  var body: some View {
+    Text(text)
+      .font(.system(size: 13, weight: .regular))
+      .foregroundStyle(.white.opacity(0.92))
+      .multilineTextAlignment(.leading)
+      .lineLimit(4, reservesSpace: false)
+      .truncationMode(.head)
+      .frame(width: 520, alignment: .leading)
+      .fixedSize(horizontal: false, vertical: true)
+      .padding(.horizontal, 14)
+      .padding(.vertical, 10)
+      .background(
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+          .fill(.ultraThinMaterial)
+          .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+              .fill(.black.opacity(0.35))
+          )
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+          .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+      )
+      .compositingGroup()
+      .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+      .animation(.easeOut(duration: 0.18), value: text)
+  }
+}
+
+// MARK: - Integration toggle button
+
+/// Labeled chip rendered in the action-mode picker row under the HUD:
+/// `[icon] Name [fn+N]`. Locked state inverts to a tinted fill so the
+/// active routing target reads at a glance. The shortcut badge mirrors
+/// the `fn + N` global hotkey so users learn the keystroke without a
+/// tooltip.
+private struct IntegrationToggleButton: View {
+  let identifier: Integration.Identifier
+  let isLocked: Bool
+  let shortcutNumber: Int
+  let onTap: () -> Void
+
+  private var integration: Integration? {
+    Integration.all.first { $0.identifier == identifier }
+  }
+
+  /// Compact name for the chip — drop the platform prefix so "Apple
+  /// Reminders" → "Reminders" and "Google Calendar" → "Calendar". The
+  /// integration's tint already conveys which one it is.
+  private var shortName: String {
+    let name = integration?.name ?? identifier.rawValue
+    if name.hasPrefix("Apple ") { return String(name.dropFirst("Apple ".count)) }
+    if name.hasPrefix("Google ") { return String(name.dropFirst("Google ".count)) }
+    return name
+  }
+
+  var body: some View {
+    Button(action: onTap) {
+      HStack(spacing: 6) {
+        Image(systemName: integration?.systemImage ?? "questionmark.circle")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(isLocked ? .white : tintColor)
+          .frame(width: 14, height: 14)
+
+        Text(shortName)
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(.white.opacity(isLocked ? 1.0 : 0.85))
+
+        Text("fn\(shortcutNumber)")
+          .font(.system(size: 9, weight: .semibold).monospacedDigit())
+          .foregroundStyle(.white.opacity(isLocked ? 0.85 : 0.45))
+          .padding(.horizontal, 5)
+          .padding(.vertical, 2)
+          .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+              .fill(.white.opacity(isLocked ? 0.22 : 0.10))
+          )
+      }
+      .padding(.horizontal, 8)
+      .padding(.vertical, 5)
+      .background(
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+          .fill(isLocked ? tintColor : Color.white.opacity(0.08))
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+          .strokeBorder(
+            isLocked ? Color.white.opacity(0.55) : Color.white.opacity(0.10),
+            lineWidth: isLocked ? 1.0 : 0.5
+          )
+      )
+    }
+    .buttonStyle(.plain)
+    .help("\(integration?.name ?? identifier.rawValue) — fn+\(shortcutNumber)")
+    .accessibilityLabel("\(integration?.name ?? identifier.rawValue) — \(isLocked ? "locked" : "unlocked"). Shortcut: function key plus \(shortcutNumber).")
+  }
+
+  private var tintColor: Color {
+    Color(hex: integration?.tintHex ?? "") ?? .purple
   }
 }
 

@@ -14,12 +14,16 @@ extension NSNotification.Name {
 
 enum ActionConfirmationNotification {
   static let intentKey = "actionIntent"
+  static let rawTranscriptKey = "rawTranscript"
 
-  static func post(intent: ActionIntent) {
+  static func post(intent: ActionIntent, rawTranscript: String = "") {
     NotificationCenter.default.post(
       name: .presentActionConfirmation,
       object: nil,
-      userInfo: [intentKey: intent]
+      userInfo: [
+        intentKey: intent,
+        rawTranscriptKey: rawTranscript,
+      ]
     )
   }
 }

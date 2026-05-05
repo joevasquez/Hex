@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0
+
+### New
+
+- **Live transcript under the HUD (macOS).** While you dictate, a card under the recording pill shows what you're saying in real time — powered by Apple's on-device speech recognizer running in parallel with Whisper/Parakeet. The accurate final transcript is still produced by your selected model on release; the live card is just a preview so you know we're hearing you. Card height grows from one line up to four, then keeps the latest words visible. Grant the new "Speech Recognition" permission on first launch.
+- **Redesigned Action confirmation panel (macOS).** The post-dictation confirmation now shows a **HEARD** section quoting what we transcribed, a **WILL DO** preview card with the structured fields the integration will receive (each row inline-editable via the pencil), and a single purple **Run action** button (`↵` to fire). Replaces the old form-style sheet.
+- **Pre-pick where actions go (macOS).** In Action mode, a chip row appears under the HUD listing your connected integrations — Apple Reminders, Calendar, Todoist, Gmail, Google Calendar (when signed in). Tap a chip to **lock** that integration: the next dictation goes there regardless of how you phrase it. Each chip carries an `fn N` badge so you can also press **fn + 1**, **fn + 2**, etc. to toggle without clicking. Tap again (or press the same shortcut) to release the lock and let the LLM decide.
+
 ## 0.10.0
 
 ### New

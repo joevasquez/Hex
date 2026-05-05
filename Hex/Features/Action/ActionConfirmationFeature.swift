@@ -9,6 +9,9 @@ struct ActionConfirmationFeature {
   @ObservableState
   struct State: Equatable {
     var intent: ActionIntent
+    /// Raw transcript that produced this intent — quoted in the
+    /// confirmation panel's "HEARD" section.
+    var rawTranscript: String
     var selectedIntegration: Integration.Identifier
     var availableIntegrations: [Integration.Identifier]
     var editableTitle: String
@@ -34,8 +37,9 @@ struct ActionConfirmationFeature {
     var isExecuting: Bool = false
     var error: String?
 
-    init(intent: ActionIntent) {
+    init(intent: ActionIntent, rawTranscript: String = "") {
       self.intent = intent
+      self.rawTranscript = rawTranscript
       self.selectedIntegration = intent.targetIntegration
       self.availableIntegrations = [intent.targetIntegration]
       self.editableTitle = intent.title

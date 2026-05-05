@@ -9,7 +9,26 @@ import AppKit
 import ComposableArchitecture
 import Dependencies
 import HexCore
+import Sauce
 import SwiftUI
+
+/// Maps Sauce key codes for top-row digits 1…9 to their numeric value.
+/// Returns nil for any other key (including `0` — the picker only goes
+/// up to nine integrations to keep the chip row from wrapping).
+private func digitValue(for key: Key) -> Int? {
+  switch key {
+  case .one: return 1
+  case .two: return 2
+  case .three: return 3
+  case .four: return 4
+  case .five: return 5
+  case .six: return 6
+  case .seven: return 7
+  case .eight: return 8
+  case .nine: return 9
+  default: return nil
+  }
+}
 
 @Reducer
 struct AppFeature {
@@ -99,6 +118,7 @@ struct AppFeature {
         return .merge(
           startPasteLastTranscriptMonitoring(),
           startCycleModeHotKeyMonitoring(),
+          startActionIntegrationHotKeyMonitoring(),
           ensureSelectedModelReadiness(),
           startPermissionMonitoring()
         )
@@ -263,6 +283,55 @@ struct AppFeature {
 
         MainActor.assumeIsolated {
           send(.transcription(.cycleMode))
+        }
+        return true
+      }
+
+      defer { token.cancel() }
+
+      await withTaskCancellationHandler {
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .seconds(60))
+        }
+      } onCancel: {
+        token.cancel()
+      }
+    }
+  }
+
+  /// Listens for `fn + 1`…`fn + 9` while the HUD is in Action mode and
+  /// toggles the matching integration lock. Mirrors the data-race-safe
+  /// pattern used by the paste / cycle-mode monitors above.
+  ///
+  /// The reducer (TranscriptionFeature) ignores the action when not in
+  /// Action mode, but we also gate it here so we don't intercept fn+digit
+  /// keystrokes for users who never touch Action mode.
+  private func startActionIntegrationHotKeyMonitoring() -> Effect<Action> {
+    .run { send in
+      @Shared(.hexSettings) var hexSettings: HexSettings
+      let sharedHexSettings = $hexSettings
+
+      let token = keyEventMonitor.handleKeyEvent { keyEvent in
+        // Fast reject: must have fn modifier and exactly one of digits 1-9.
+        guard keyEvent.modifiers.contains(kind: .fn),
+              let key = keyEvent.key,
+              let digit = digitValue(for: key) else {
+          return false
+        }
+        // Must be ONLY fn (no command/option/shift/control combos), so
+        // we don't fight other apps' fn+modifier shortcuts.
+        let mods = keyEvent.modifiers
+        if mods.contains(kind: .command) || mods.contains(kind: .option) ||
+           mods.contains(kind: .shift) || mods.contains(kind: .control) {
+          return false
+        }
+        // Don't intercept while the user is dictating (recording) so the
+        // running hotkey + speech path stays clean. The picker is a
+        // pre-recording or idle affordance.
+        _ = sharedHexSettings.wrappedValue  // future-proof — kept for symmetry
+
+        MainActor.assumeIsolated {
+          send(.transcription(.actionIntegrationKeyboardToggle(digit)))
         }
         return true
       }

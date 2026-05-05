@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0
+
+### Minor Changes
+
+- Live transcript HUD card via on-device speech recognition, redesigned Action confirmation panel (HEARD/WILL DO), and HUD integration picker with fn+1..fn+9 hard-lock shortcuts in Action mode
+
 ## 0.8.0
 
 ### Minor Changes

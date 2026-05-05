@@ -78,17 +78,12 @@ struct QuillRecordingTranscriptCard: View {
     .padding(14)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(
-      // Solid white per the spec — keeps the transcript page-like
-      // against the lavender app bg.
       RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .fill(Color.white)
+        .fill(Color(.systemBackground))
     )
     .overlay(
-      // 0.5px hairline at rgba(0,0,0,0.05) — almost invisible, just
-      // enough edge so the white card doesn't melt into a near-white
-      // app bg.
       RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .stroke(Color.black.opacity(0.05), lineWidth: 0.5)
+        .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
     )
     // No external bottom padding — the outer ScrollView's recording-
     // mode bottom spacer + the waveform card's own internal vertical
@@ -112,10 +107,8 @@ struct QuillRecordingTranscriptCard: View {
 /// `recorder.averagePower`) immediately advances the rolling buffer.
 /// No timer, no stale captures.
 struct WaveformBottomBar: View {
-  /// Observed directly so changes to `meterLevel` are SwiftUI-tracked.
-  /// We don't pass `meterLevel: Float` as a prop because the surrounding
-  /// closures would capture stale values and the bars would freeze.
   @ObservedObject var vm: RecordingViewModel
+  @Environment(\.colorScheme) private var colorScheme
 
   /// Rolling 32-sample history. Floor of 0.04 keeps a baseline shape
   /// on first paint instead of all bars collapsing to zero.
@@ -138,10 +131,11 @@ struct WaveformBottomBar: View {
       RoundedRectangle(cornerRadius: 20, style: .continuous)
         .fill(
           LinearGradient(
-            colors: [
-              Color(red: 0.953, green: 0.910, blue: 1.000),  // #f3e8ff
-              Color(red: 0.929, green: 0.882, blue: 0.976),  // #ede1f9
-            ],
+            colors: colorScheme == .dark
+              ? [Color(red: 0.18, green: 0.14, blue: 0.24),
+                 Color(red: 0.15, green: 0.11, blue: 0.20)]
+              : [Color(red: 0.953, green: 0.910, blue: 1.000),
+                 Color(red: 0.929, green: 0.882, blue: 0.976)],
             startPoint: .top,
             endPoint: .bottom
           )
@@ -150,7 +144,7 @@ struct WaveformBottomBar: View {
     .overlay(
       RoundedRectangle(cornerRadius: 20, style: .continuous)
         .stroke(
-          Color(red: 0.486, green: 0.227, blue: 0.929).opacity(0.18),  // rgba(124,58,237,0.18)
+          Color(red: 0.486, green: 0.227, blue: 0.929).opacity(colorScheme == .dark ? 0.30 : 0.18),
           lineWidth: 0.5
         )
     )

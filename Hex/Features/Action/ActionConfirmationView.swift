@@ -3,125 +3,328 @@ import HexCore
 import Inject
 import SwiftUI
 
+/// Action confirmation panel — the modal a user sees after dictating in
+/// Action mode. The layout follows the "HEARD / WILL DO" pattern:
+///
+/// 1. Header tile — integration icon + "New <noun> in <Integration>" + "Action detected"
+/// 2. HEARD     — quoted raw transcript so the user can verify what we
+///                heard before we run the action
+/// 3. WILL DO   — preview card with the structured fields the integration
+///                will receive, each row inline-editable via a pencil
+/// 4. Footer    — Dismiss (ghost) + Run action (filled purple)
+///
+/// All editable fields keep the existing TCA bindings — we just changed
+/// the visual treatment.
 struct ActionConfirmationView: View {
   @Bindable var store: StoreOf<ActionConfirmationFeature>
   @ObserveInjection var inject
 
   var body: some View {
-    VStack(spacing: 0) {
+    VStack(alignment: .leading, spacing: 14) {
       header
-      Divider().opacity(0.3)
-      form
-      Divider().opacity(0.3)
+      heardSection
+      willDoSection
+      Spacer(minLength: 0)
       footer
     }
-    .frame(width: 340)
+    .padding(18)
+    .frame(width: 380)
     .background(
-      RoundedRectangle(cornerRadius: 12)
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
         .fill(.ultraThinMaterial)
-        .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(.black.opacity(0.45))
+        )
+        .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
     )
-    .clipShape(RoundedRectangle(cornerRadius: 12))
+    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     .overlay(
-      RoundedRectangle(cornerRadius: 12)
-        .strokeBorder(.white.opacity(0.1), lineWidth: 0.5)
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .strokeBorder(.white.opacity(0.10), lineWidth: 0.5)
     )
     .onAppear { store.send(.onAppear) }
     .enableInjection()
   }
 
-  // MARK: - Header (integration picker)
+  // MARK: - Header
 
   private var header: some View {
-    HStack(spacing: 8) {
-      Image(systemName: integrationIcon(store.selectedIntegration))
-        .font(.system(size: 20))
-        .foregroundStyle(integrationTint(store.selectedIntegration))
+    HStack(alignment: .center, spacing: 12) {
+      integrationTile(size: 36, cornerRadius: 8)
 
-      if store.availableIntegrations.count > 1 {
-        Picker("", selection: integrationBinding) {
-          ForEach(store.availableIntegrations, id: \.self) { id in
-            Text(integrationName(id)).tag(id)
+      VStack(alignment: .leading, spacing: 2) {
+        if store.availableIntegrations.count > 1 {
+          // Picker hosted on the title so users can change the routing
+          // mid-review without leaving the panel.
+          Picker("", selection: integrationBinding) {
+            ForEach(store.availableIntegrations, id: \.self) { id in
+              Text("New \(actionNoun(for: id)) in \(integrationName(id))").tag(id)
+            }
           }
+          .labelsHidden()
+          .pickerStyle(.menu)
+          .tint(.white)
+          .font(.system(size: 14, weight: .semibold))
+        } else {
+          Text("New \(actionNoun(for: store.selectedIntegration)) in \(integrationName(store.selectedIntegration))")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .tint(.white)
-      } else {
-        Text(integrationName(store.selectedIntegration))
-          .font(.system(size: 13, weight: .semibold))
+        Text("Action detected")
+          .font(.system(size: 11))
+          .foregroundStyle(.white.opacity(0.55))
+      }
+      Spacer(minLength: 0)
+    }
+  }
+
+  // MARK: - HEARD
+
+  @ViewBuilder
+  private var heardSection: some View {
+    if !store.rawTranscript.isEmpty {
+      VStack(alignment: .leading, spacing: 6) {
+        sectionLabel("HEARD")
+        Text("\u{201C}\(store.rawTranscript)\u{201D}")
+          .font(.system(size: 13))
+          .foregroundStyle(.white.opacity(0.85))
+          .lineSpacing(2)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
+  }
+
+  // MARK: - WILL DO
+
+  private var willDoSection: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      sectionLabel("WILL DO")
+      VStack(alignment: .leading, spacing: 0) {
+        // Top mini-row inside the card: integration tile + bold title +
+        // secondary date/time. Mirrors the screenshot's preview header.
+        HStack(alignment: .center, spacing: 10) {
+          integrationTile(size: 32, cornerRadius: 6)
+          VStack(alignment: .leading, spacing: 2) {
+            Text(displayTitle)
+              .font(.system(size: 13, weight: .semibold))
+              .foregroundStyle(.white)
+              .lineLimit(1)
+            Text(displaySubtitle)
+              .font(.system(size: 11))
+              .foregroundStyle(.white.opacity(0.55))
+              .lineLimit(1)
+          }
+          Spacer(minLength: 0)
+        }
+        .padding(12)
+
+        Divider().opacity(0.2)
+
+        // Editable per-integration field rows.
+        VStack(spacing: 0) {
+          fieldRows
+        }
+        .padding(.vertical, 4)
+
+        if let error = store.error {
+          Text(error)
+            .font(.system(size: 11))
+            .foregroundStyle(.red.opacity(0.9))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+      }
+      .background(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(.white.opacity(0.05))
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+      )
+    }
+  }
+
+  @ViewBuilder
+  private var fieldRows: some View {
+    if store.selectedIntegration == .gmail {
+      EditableRow(icon: "person", label: "To") {
+        TextField("e.g. mike@acme.com", text: $store.editableRecipient)
+          .textFieldStyle(.plain)
+          .font(.system(size: 13))
+          .foregroundStyle(.white)
+      }
+      EditableRow(icon: "envelope", label: "Subject") {
+        TextField("Subject", text: $store.editableSubject)
+          .textFieldStyle(.plain)
+          .font(.system(size: 13))
+          .foregroundStyle(.white)
+      }
+      EditableRow(icon: "text.alignleft", label: "Body") {
+        TextField("Draft body text", text: $store.editableBody, axis: .vertical)
+          .textFieldStyle(.plain)
+          .font(.system(size: 13))
+          .foregroundStyle(.white)
+          .lineLimit(2 ... 4)
+      }
+    } else {
+      EditableRow(icon: integrationIcon(store.selectedIntegration), label: "Title") {
+        TextField("Title", text: $store.editableTitle)
+          .textFieldStyle(.plain)
+          .font(.system(size: 13))
           .foregroundStyle(.white)
       }
 
-      Spacer()
-    }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 12)
-  }
-
-  private var integrationBinding: Binding<Integration.Identifier> {
-    Binding(
-      get: { store.selectedIntegration },
-      set: { store.send(.selectedIntegrationChanged($0)) }
-    )
-  }
-
-  // MARK: - Form (per-integration fields)
-
-  @ViewBuilder
-  private var form: some View {
-    VStack(spacing: 10) {
-      if store.selectedIntegration == .gmail {
-        field("To", text: $store.editableRecipient, placeholder: "e.g. mike@acme.com")
-        field("Subject", text: $store.editableSubject)
-        field("Body", text: $store.editableBody, placeholder: "Draft body text")
-      } else {
-        field("Title", text: $store.editableTitle)
-
-        if store.selectedIntegration == .calendar || store.selectedIntegration == .googleCalendar {
-          datePickerRow("Start", selection: tiedStartDateBinding)
-          datePickerRow("End", selection: $store.editableEndDate)
-        } else {
-          field("Due", text: $store.editableDueDate, placeholder: "e.g. Friday, tomorrow")
-        }
-
-        if !store.availableLists.isEmpty {
-          HStack {
-            Text(listLabel)
-              .font(.system(size: 11, weight: .medium))
-              .foregroundStyle(.white.opacity(0.5))
-              .frame(width: 50, alignment: .leading)
-            Picker("", selection: $store.selectedList) {
-              ForEach(store.availableLists, id: \.self) { list in
-                Text(list).tag(list)
-              }
-            }
+      if store.selectedIntegration == .calendar || store.selectedIntegration == .googleCalendar {
+        EditableRow(icon: "calendar", label: "Start") {
+          DatePicker("", selection: tiedStartDateBinding, displayedComponents: [.date, .hourAndMinute])
             .labelsHidden()
-            .pickerStyle(.menu)
-            .tint(.white.opacity(0.8))
-          }
+            .datePickerStyle(.compact)
+            .tint(.white.opacity(0.9))
         }
-
-        if store.selectedIntegration == .todoist {
-          priorityPicker
+        EditableRow(icon: "clock", label: "End") {
+          DatePicker("", selection: $store.editableEndDate, displayedComponents: [.date, .hourAndMinute])
+            .labelsHidden()
+            .datePickerStyle(.compact)
+            .tint(.white.opacity(0.9))
         }
-
-        if store.selectedIntegration == .calendar || store.selectedIntegration == .googleCalendar {
-          field("Attendees", text: $store.editableAttendees, placeholder: "e.g. john@acme.com, sarah@acme.com")
+      } else {
+        EditableRow(icon: "info.circle", label: "Due") {
+          TextField("e.g. Friday, tomorrow", text: $store.editableDueDate)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .foregroundStyle(.white)
         }
-
-        field("Notes", text: $store.editableNotes, placeholder: "Optional")
       }
 
-      if let error = store.error {
-        Text(error)
-          .font(.system(size: 10))
-          .foregroundStyle(.red.opacity(0.9))
-          .frame(maxWidth: .infinity, alignment: .leading)
+      if !store.availableLists.isEmpty {
+        EditableRow(icon: listIcon, label: listLabel) {
+          Picker("", selection: $store.selectedList) {
+            ForEach(store.availableLists, id: \.self) { list in
+              Text(list).tag(list)
+            }
+          }
+          .labelsHidden()
+          .pickerStyle(.menu)
+          .tint(.white.opacity(0.9))
+        }
+      }
+
+      if store.selectedIntegration == .todoist {
+        EditableRow(icon: "flag", label: "Priority") {
+          Picker("", selection: $store.editablePriority) {
+            Text("None").tag(0)
+            Text("P1 (urgent)").tag(4)
+            Text("P2").tag(3)
+            Text("P3").tag(2)
+            Text("P4 (low)").tag(1)
+          }
+          .labelsHidden()
+          .pickerStyle(.menu)
+          .tint(.white.opacity(0.9))
+        }
+      }
+
+      if store.selectedIntegration == .calendar || store.selectedIntegration == .googleCalendar {
+        EditableRow(icon: "person.2", label: "Attendees") {
+          TextField("e.g. john@acme.com", text: $store.editableAttendees)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .foregroundStyle(.white)
+        }
+      }
+
+      EditableRow(icon: "note.text", label: "Notes") {
+        TextField("Optional", text: $store.editableNotes, axis: .vertical)
+          .textFieldStyle(.plain)
+          .font(.system(size: 13))
+          .foregroundStyle(.white)
+          .lineLimit(1 ... 3)
       }
     }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 12)
+  }
+
+  // MARK: - Footer
+
+  private var footer: some View {
+    HStack(spacing: 10) {
+      Button { store.send(.cancel) } label: {
+        Text("Dismiss")
+          .font(.system(size: 13, weight: .medium))
+          .foregroundStyle(.white.opacity(0.7))
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 8)
+      }
+      .buttonStyle(.plain)
+
+      Button { store.send(.execute) } label: {
+        HStack(spacing: 8) {
+          if store.isExecuting {
+            ProgressView()
+              .scaleEffect(0.6)
+              .frame(width: 14, height: 14)
+              .tint(.white)
+          }
+          Text("Run action")
+            .font(.system(size: 13, weight: .semibold))
+          // Return-key glyph chip on the trailing edge.
+          RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(.white.opacity(0.22))
+            .frame(width: 18, height: 18)
+            .overlay(
+              Image(systemName: "return")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+            )
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .background(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(executeDisabled ? Color.purple.opacity(0.4) : Color.purple)
+        )
+      }
+      .buttonStyle(.plain)
+      .disabled(executeDisabled)
+      .keyboardShortcut(.defaultAction)
+    }
+  }
+
+  // MARK: - Helpers
+
+  private var executeDisabled: Bool {
+    if store.isExecuting { return true }
+    if store.selectedIntegration == .gmail {
+      return store.editableSubject.isEmpty
+    }
+    return store.editableTitle.isEmpty
+  }
+
+  private var displayTitle: String {
+    if store.selectedIntegration == .gmail, !store.editableSubject.isEmpty {
+      return store.editableSubject
+    }
+    return store.editableTitle.isEmpty ? "(untitled)" : store.editableTitle
+  }
+
+  private var displaySubtitle: String {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    switch store.selectedIntegration {
+    case .calendar, .googleCalendar:
+      let s = formatter.string(from: store.editableStartDate)
+      return s
+    case .gmail:
+      return store.editableRecipient.isEmpty ? "Draft" : "To: \(store.editableRecipient)"
+    default:
+      if !store.editableDueDate.isEmpty { return store.editableDueDate }
+      return store.selectedList.isEmpty ? "No date" : store.selectedList
+    }
   }
 
   private var listLabel: String {
@@ -132,23 +335,23 @@ struct ActionConfirmationView: View {
     }
   }
 
-  private func datePickerRow(_ label: String, selection: Binding<Date>) -> some View {
-    HStack {
-      Text(label)
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(.white.opacity(0.5))
-        .frame(width: 50, alignment: .leading)
-      DatePicker("", selection: selection, displayedComponents: [.date, .hourAndMinute])
-        .labelsHidden()
-        .datePickerStyle(.compact)
-        .tint(.white.opacity(0.8))
-      Spacer(minLength: 0)
+  private var listIcon: String {
+    switch store.selectedIntegration {
+    case .todoist: "folder"
+    case .calendar, .googleCalendar: "calendar.badge.plus"
+    default: "list.bullet"
     }
   }
 
-  /// Shifts `editableEndDate` by the same delta when start changes, so the
-  /// user-chosen duration is preserved as they pick a new start. Independent
-  /// edits to End remain untied.
+  private var integrationBinding: Binding<Integration.Identifier> {
+    Binding(
+      get: { store.selectedIntegration },
+      set: { store.send(.selectedIntegrationChanged($0)) }
+    )
+  }
+
+  /// Shifts `editableEndDate` by the same delta when start changes so the
+  /// user-chosen duration is preserved.
   private var tiedStartDateBinding: Binding<Date> {
     Binding(
       get: { store.editableStartDate },
@@ -160,111 +363,36 @@ struct ActionConfirmationView: View {
     )
   }
 
-  private var priorityPicker: some View {
-    HStack {
-      Text("Priority")
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(.white.opacity(0.5))
-        .frame(width: 50, alignment: .leading)
-      Picker("", selection: $store.editablePriority) {
-        Text("None").tag(0)
-        Text("P1 (urgent)").tag(4)
-        Text("P2").tag(3)
-        Text("P3").tag(2)
-        Text("P4 (low)").tag(1)
-      }
-      .labelsHidden()
-      .pickerStyle(.menu)
-      .tint(.white.opacity(0.8))
-    }
+  private func sectionLabel(_ text: String) -> some View {
+    Text(text)
+      .font(.system(size: 10, weight: .semibold))
+      .tracking(1.4)
+      .foregroundStyle(.white.opacity(0.45))
   }
 
-  private func field(
-    _ label: String,
-    text: Binding<String>,
-    placeholder: String = ""
-  ) -> some View {
-    HStack {
-      Text(label)
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(.white.opacity(0.5))
-        .frame(width: 50, alignment: .leading)
-      TextField(placeholder, text: text)
-        .textFieldStyle(.plain)
-        .font(.system(size: 12))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-          RoundedRectangle(cornerRadius: 6)
-            .fill(.white.opacity(0.08))
-        )
-    }
+  /// 36×36 (or 32×32) integration icon tile — colored background with the
+  /// integration's `systemImage` in white. Reused by header + WILL DO card
+  /// so the routing target reads the same in both places.
+  private func integrationTile(size: CGFloat, cornerRadius: CGFloat) -> some View {
+    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+      .fill(integrationTint(store.selectedIntegration))
+      .frame(width: size, height: size)
+      .overlay(
+        Image(systemName: integrationIcon(store.selectedIntegration))
+          .font(.system(size: size * 0.5, weight: .semibold))
+          .foregroundStyle(.white)
+      )
   }
 
-  // MARK: - Footer
-
-  private var footer: some View {
-    HStack(spacing: 12) {
-      Spacer()
-
-      Button { store.send(.cancel) } label: {
-        HStack(spacing: 4) {
-          Image(systemName: "xmark")
-            .font(.system(size: 10, weight: .bold))
-          Text("Cancel")
-            .font(.system(size: 11, weight: .semibold))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(.white.opacity(0.12)))
-      }
-      .buttonStyle(.plain)
-
-      Button { store.send(.execute) } label: {
-        HStack(spacing: 4) {
-          if store.isExecuting {
-            ProgressView()
-              .scaleEffect(0.6)
-              .frame(width: 10, height: 10)
-          } else {
-            Image(systemName: "checkmark")
-              .font(.system(size: 10, weight: .bold))
-          }
-          Text(executeLabel)
-            .font(.system(size: 11, weight: .semibold))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(.green.opacity(0.7)))
-      }
-      .buttonStyle(.plain)
-      .disabled(executeDisabled)
-    }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 10)
-  }
-
-  private var executeDisabled: Bool {
-    if store.isExecuting { return true }
-    if store.selectedIntegration == .gmail {
-      return store.editableSubject.isEmpty
-    }
-    return store.editableTitle.isEmpty
-  }
-
-  private var executeLabel: String {
-    switch store.selectedIntegration {
-    case .todoist: "Add Task"
-    case .calendar, .googleCalendar: "Add Event"
-    case .gmail: "Save Draft"
-    default: "Create"
+  private func actionNoun(for id: Integration.Identifier) -> String {
+    switch id {
+    case .calendar, .googleCalendar: "event"
+    case .gmail: "draft"
+    case .todoist: "task"
+    case .appleReminders: "reminder"
+    default: "item"
     }
   }
-
-  // MARK: - Integration display helpers
 
   private func integrationName(_ id: Integration.Identifier) -> String {
     Integration.all.first { $0.identifier == id }?.name ?? id.rawValue
@@ -280,14 +408,32 @@ struct ActionConfirmationView: View {
   }
 }
 
-private extension Color {
-  init?(hex: String) {
-    var h = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-    if h.hasPrefix("#") { h.removeFirst() }
-    guard h.count == 6, let v = UInt32(h, radix: 16) else { return nil }
-    let r = Double((v >> 16) & 0xFF) / 255
-    let g = Double((v >> 8) & 0xFF) / 255
-    let b = Double(v & 0xFF) / 255
-    self = Color(red: r, green: g, blue: b)
+// MARK: - EditableRow
+
+/// Single row inside the WILL DO card: leading icon, label, value control,
+/// trailing pencil. The pencil is decorative — the value control is always
+/// editable inline; the pencil signals "this is editable" without adding a
+/// state machine for "expanded vs collapsed" rows.
+private struct EditableRow<Content: View>: View {
+  let icon: String
+  let label: String
+  @ViewBuilder var content: () -> Content
+
+  var body: some View {
+    HStack(spacing: 10) {
+      Image(systemName: icon)
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(.white.opacity(0.55))
+        .frame(width: 16, height: 16)
+
+      content()
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+      Image(systemName: "pencil")
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.white.opacity(0.35))
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 8)
   }
 }

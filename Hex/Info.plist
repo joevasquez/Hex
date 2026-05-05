@@ -13,9 +13,9 @@
 	<key>CFBundleName</key>
 	<string>Quill</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.10.0</string>
+	<string>0.11.0</string>
 	<key>CFBundleVersion</key>
-	<string>93</string>
+	<string>94</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSAccessibilityUsageDescription</key>
@@ -26,5 +26,7 @@
 	<string>Quill creates calendar events from your voice commands in Action mode.</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>Quill creates reminders from your voice commands in Action mode.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Quill uses on-device speech recognition to show a live transcript while you dictate.</string>
 </dict>
 </plist>

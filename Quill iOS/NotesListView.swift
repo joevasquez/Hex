@@ -13,6 +13,7 @@ import SwiftUI
 struct NotesListView: View {
   @ObservedObject var store: NotesStore
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.colorScheme) private var colorScheme
   @State private var renamingNoteID: UUID?
   @State private var renameDraft: String = ""
   @State private var searchQuery: String = ""
@@ -57,7 +58,9 @@ struct NotesListView: View {
         notesContent
       }
       .background(
-        Color(red: 0.957, green: 0.945, blue: 0.973)  // #f4f1f8 app bg
+        (colorScheme == .dark
+          ? Color(red: 0.11, green: 0.11, blue: 0.12)
+          : Color(red: 0.957, green: 0.945, blue: 0.973))
           .ignoresSafeArea()
       )
       .toolbar(.hidden, for: .navigationBar)
@@ -280,6 +283,7 @@ private struct NoteRow: View {
   let onTap: () -> Void
   let onRename: () -> Void
   let onDelete: () -> Void
+  @Environment(\.colorScheme) private var colorScheme
 
   var body: some View {
     Button(action: onTap) {
@@ -376,7 +380,7 @@ private struct NoteRow: View {
       // sit flush in the secondary system background.
       .background(
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(isActive ? Color.white : Color(.secondarySystemBackground))
+          .fill(isActive ? Color(.systemBackground) : Color(.secondarySystemBackground))
       )
       .overlay(
         RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -416,7 +420,7 @@ private struct NoteRow: View {
       .font(.subheadline.weight(.semibold))
       .foregroundStyle(tint)
       .frame(width: 38, height: 38)
-      .background(Circle().fill(.white))
+      .background(Circle().fill(Color(.systemBackground)))
       .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
       .overlay(
         Circle().stroke(tint.opacity(0.15), lineWidth: 0.5)

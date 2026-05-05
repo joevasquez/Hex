@@ -18,10 +18,7 @@ struct NoteTextView: View {
   let text: String
   var font: Font = .body
   var textColor: Color = .primary
-  /// Default bullet color is `#2a1f3d` — a deep aubergine that holds
-  /// contrast against lavender card backgrounds without dragging the
-  /// eye away from the body text.
-  var bulletColor: Color = Color(red: 0.165, green: 0.122, blue: 0.239)
+  var bulletColor: Color = .primary
   var headingColor: Color? = nil
 
   var body: some View {

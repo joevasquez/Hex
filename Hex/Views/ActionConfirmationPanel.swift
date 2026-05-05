@@ -13,7 +13,7 @@ class ActionConfirmationPanel: NSPanel {
     ]
 
     super.init(
-      contentRect: .init(x: 0, y: 0, width: 340, height: 260),
+      contentRect: .init(x: 0, y: 0, width: 380, height: 460),
       styleMask: styleMask,
       backing: .buffered,
       defer: false

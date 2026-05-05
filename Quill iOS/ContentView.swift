@@ -708,11 +708,16 @@ struct ContentView: View {
 
   // MARK: - Background
 
+  @Environment(\.colorScheme) private var colorScheme
+
   private var backgroundGradient: some View {
-    // Solid #f4f1f8 (the app's lavender base) per the spec — no
-    // gradient. Keeps the surface uniform so card borders and shadows
-    // read consistently regardless of where they sit on the screen.
-    Color(red: 0.957, green: 0.945, blue: 0.973)
+    Group {
+      if colorScheme == .dark {
+        Color(red: 0.11, green: 0.11, blue: 0.12)
+      } else {
+        Color(red: 0.957, green: 0.945, blue: 0.973)
+      }
+    }
   }
 
   // MARK: - Mode chips

@@ -3,6 +3,7 @@
 //  Hex
 //
 
+import AppKit
 import ComposableArchitecture
 import HexCore
 import Inject
@@ -42,6 +43,7 @@ struct AIProcessingSectionView: View {
     if store.hexSettings.aiProcessingEnabled {
       providerSection
       defaultModeSection
+      perAppOverridesSection
       behaviorSection
     }
   }
@@ -170,6 +172,65 @@ struct AIProcessingSectionView: View {
     }
   }
 
+  // MARK: - Per-app overrides
+
+  /// User-managed list of "when I'm in <App>, use <Mode>" rules.
+  /// Sits below the built-in "Auto-select mode by app" toggle and
+  /// the default-mode picker — overrides win over both. Each rule is
+  /// rendered as a row with an app picker (NSOpenPanel-driven) and
+  /// a mode picker. Empty list shows a helpful empty-state row.
+  @ViewBuilder private var perAppOverridesSection: some View {
+    Section {
+      if store.hexSettings.appModeRules.isEmpty {
+        Label {
+          VStack(alignment: .leading, spacing: 4) {
+            Text("No per-app overrides yet")
+              .foregroundStyle(.secondary)
+            Text("Add a rule below to use a different AI mode in specific apps. Overrides beat both the default and the auto-select toggle.")
+              .settingsCaption()
+          }
+        } icon: {
+          Image(systemName: "app.dashed")
+        }
+      } else {
+        ForEach(store.hexSettings.appModeRules) { rule in
+          AppModeRuleRow(
+            rule: rule,
+            onPickApp: { picked in
+              store.send(.updateAppModeRule(.init(
+                id: rule.id,
+                bundleIdentifier: picked.bundleIdentifier,
+                appName: picked.appName,
+                mode: rule.mode
+              )))
+            },
+            onModeChange: { mode in
+              store.send(.updateAppModeRule(.init(
+                id: rule.id,
+                bundleIdentifier: rule.bundleIdentifier,
+                appName: rule.appName,
+                mode: mode
+              )))
+            },
+            onRemove: { store.send(.removeAppModeRule(rule.id)) }
+          )
+        }
+      }
+
+      Button {
+        store.send(.addAppModeRule)
+      } label: {
+        Label("Add rule…", systemImage: "plus.circle")
+      }
+      .buttonStyle(.plain)
+    } header: {
+      Text("Per-app overrides")
+    } footer: {
+      Text("Pick an app and the AI mode Quill should use whenever you dictate while it's frontmost.")
+        .settingsCaption()
+    }
+  }
+
   // MARK: - Behavior
 
   /// Cross-cutting AI behavior knobs that don't pick a mode or a
@@ -240,5 +301,100 @@ struct AIProcessingSectionView: View {
     } header: {
       Text("Behavior")
     }
+  }
+}
+
+// MARK: - AppModeRuleRow
+
+/// Single row in the per-app overrides list. Pick app via NSOpenPanel
+/// (so users can target apps by clicking them in /Applications instead
+/// of typing bundle identifiers), pick mode via a menu, remove with a
+/// red trash button. Kept as a separate view so the row layout doesn't
+/// crowd the section view above it.
+struct AppModeRuleRow: View {
+  let rule: AppModeRule
+  let onPickApp: (PickedApp) -> Void
+  let onModeChange: (AIProcessingMode) -> Void
+  let onRemove: () -> Void
+
+  /// Lightweight DTO returned by the picker so we don't leak AppKit
+  /// types up into the reducer.
+  struct PickedApp {
+    let bundleIdentifier: String
+    let appName: String
+  }
+
+  var body: some View {
+    HStack(spacing: 10) {
+      Button {
+        pickApp()
+      } label: {
+        HStack(spacing: 8) {
+          Image(systemName: "app.badge")
+            .foregroundStyle(.secondary)
+          Text(displayName)
+            .lineLimit(1)
+            .foregroundStyle(rule.bundleIdentifier.isEmpty ? .secondary : .primary)
+        }
+        .padding(.vertical, 4)
+      }
+      .buttonStyle(.plain)
+      .help("Click to pick the app this rule should apply to.")
+
+      Spacer(minLength: 8)
+
+      Picker(
+        "",
+        selection: Binding(
+          get: { rule.mode },
+          set: { onModeChange($0) }
+        )
+      ) {
+        ForEach(AIProcessingMode.allCases, id: \.self) { mode in
+          Text(mode.displayName).tag(mode)
+        }
+      }
+      .labelsHidden()
+      .pickerStyle(.menu)
+      .frame(maxWidth: 140)
+
+      Button(role: .destructive) {
+        onRemove()
+      } label: {
+        Image(systemName: "trash")
+      }
+      .buttonStyle(.borderless)
+      .help("Remove this rule.")
+    }
+  }
+
+  private var displayName: String {
+    if !rule.appName.isEmpty { return rule.appName }
+    if !rule.bundleIdentifier.isEmpty { return rule.bundleIdentifier }
+    return "Pick app…"
+  }
+
+  /// Open `NSOpenPanel` scoped to /Applications, read the picked
+  /// bundle's `Info.plist` for the bundle identifier + display name.
+  /// Falls back to the file basename if the plist read fails (rare,
+  /// but possible for non-app bundles the user might pick by mistake).
+  private func pickApp() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [.application]
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    panel.message = "Choose the app this rule should apply to"
+    panel.prompt = "Select"
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+
+    let bundle = Bundle(url: url)
+    let bundleID = bundle?.bundleIdentifier ?? ""
+    let name = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+      ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+      ?? url.deletingPathExtension().lastPathComponent
+
+    onPickApp(.init(bundleIdentifier: bundleID, appName: name))
   }
 }

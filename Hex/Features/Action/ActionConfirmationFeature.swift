@@ -45,11 +45,17 @@ struct ActionConfirmationFeature {
     /// Result that drives the success badge view. Carries the
     /// integration + final title so the badge can render
     /// "Added to <Integration>" without re-deriving from the intent.
+    /// `externalID` is the adapter-returned identifier (EventKit's
+    /// `calendarItemIdentifier`, Todoist task id, etc.) — currently
+    /// unused for the deep-link pill (we open the app root) but kept
+    /// here so per-item links can land later without another state
+    /// reshuffle.
     struct Completion: Equatable {
       enum Kind: Equatable { case created, queued }
       let kind: Kind
       let integration: Integration.Identifier
       let title: String
+      let externalID: String?
     }
 
     init(intent: ActionIntent, rawTranscript: String = "") {
@@ -234,13 +240,14 @@ struct ActionConfirmationFeature {
           }
         }
 
-      case .executionSucceeded:
+      case let .executionSucceeded(externalID):
         state.isExecuting = false
         soundEffect.play(.pasteTranscript)
         state.completion = .init(
           kind: .created,
           integration: state.selectedIntegration,
-          title: completionTitle(state)
+          title: completionTitle(state),
+          externalID: externalID
         )
         actionLogger.info("Action executed successfully")
         return .run { send in
@@ -256,7 +263,8 @@ struct ActionConfirmationFeature {
         state.completion = .init(
           kind: .queued,
           integration: state.selectedIntegration,
-          title: completionTitle(state)
+          title: completionTitle(state),
+          externalID: nil
         )
         actionLogger.info("Action queued for offline retry")
         // Soft-success: same beat as the success path, but the badge

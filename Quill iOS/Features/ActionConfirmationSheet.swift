@@ -13,6 +13,7 @@ extension Notification.Name {
 @MainActor
 final class ActionConfirmationViewModel: ObservableObject {
   @Published var intent: ActionIntent
+  @Published var rawTranscript: String = ""
   @Published var selectedIntegration: Integration.Identifier
   @Published var availableIntegrations: [Integration.Identifier] = []
   @Published var availableLists: [String] = []
@@ -32,6 +33,11 @@ final class ActionConfirmationViewModel: ObservableObject {
   @Published var editableBody: String = ""
   @Published var isExecuting: Bool = false
   @Published var error: String?
+  /// True between recording-stop and parsedIntent landing. The sheet
+  /// opens in this state so the user sees their captured transcript in
+  /// HEARD with a spinner card where WILL DO will be — mirrors the
+  /// macOS HUD's "I heard you" continuity into the confirmation panel.
+  @Published var isParsing: Bool = false
   /// Set after a successful (or queued) execution so the sheet can
   /// flip to the success badge before dismissing. Mirrors the
   /// completion treatment we want on macOS so users get a brief
@@ -44,9 +50,79 @@ final class ActionConfirmationViewModel: ObservableObject {
     let kind: Kind
     let integration: Integration.Identifier
     let title: String
+    /// id assigned by the integration adapter, e.g. an EventKit
+    /// `calendarItemIdentifier` or a Todoist task id. Lets the badge
+    /// build a deep link straight to the created item when the
+    /// integration's URL scheme supports per-item links — otherwise
+    /// the badge falls back to opening the integration's app root.
+    let externalID: String?
   }
 
-  init(intent: ActionIntent) {
+  /// Empty-shell init for the "open during parse" path. Sheet presents
+  /// with `isParsing = true`, transcript visible in HEARD, and the WILL
+  /// DO card replaced by a parsing placeholder. ContentView calls
+  /// `applyParsedIntent(_:)` once the LLM returns to populate the form.
+  init(transcript: String) {
+    let placeholder = ActionIntent(
+      actionType: .createTask,
+      targetIntegration: .appleReminders,
+      title: ""
+    )
+    self.intent = placeholder
+    self.rawTranscript = transcript
+    self.selectedIntegration = .appleReminders
+    self.isParsing = true
+    let start = Self.defaultEventStart()
+    self.editableStartDate = start
+    self.editableEndDate = start.addingTimeInterval(3600)
+  }
+
+  init(intent: ActionIntent, rawTranscript: String = "") {
+    self.intent = intent
+    self.rawTranscript = rawTranscript
+    self.selectedIntegration = intent.targetIntegration
+    self.editableTitle = intent.title
+    self.editableDueDate = intent.dueDate ?? ""
+    self.editableNotes = intent.notes ?? ""
+    self.selectedList = intent.listName ?? ""
+    self.editablePriority = intent.priority ?? 0
+    self.editableAttendees = intent.attendees?.joined(separator: ", ") ?? ""
+    self.editableRecipient = intent.recipient ?? ""
+    self.editableSubject = intent.subject ?? intent.title
+    self.editableBody = intent.notes ?? ""
+
+    let parsedStart = (intent.dueDate.flatMap { parseDateAndTime($0) }) ?? Self.defaultEventStart()
+    let minutes = intent.duration ?? 60
+    self.editableStartDate = parsedStart
+    self.editableEndDate = parsedStart.addingTimeInterval(Double(minutes) * 60)
+  }
+
+  /// Resets the VM into the "we just stopped recording, parsing now"
+  /// state. Called by ContentView when `phase` flips to `.actionParsing`
+  /// so the sheet can open immediately with the transcript visible
+  /// instead of waiting for the LLM round-trip.
+  func startParsing(transcript: String) {
+    self.rawTranscript = transcript
+    self.isParsing = true
+    self.completion = nil
+    self.error = nil
+    self.editableTitle = ""
+    self.editableDueDate = ""
+    self.editableNotes = ""
+    self.selectedList = ""
+    self.editablePriority = 0
+    self.editableAttendees = ""
+    self.editableRecipient = ""
+    self.editableSubject = ""
+    self.editableBody = ""
+    self.selectedIntegration = .appleReminders
+  }
+
+  /// Drops the parsing state and populates the form fields from the
+  /// LLM-produced intent. Safe to call repeatedly — last write wins,
+  /// so re-parses (e.g. after the user retries) replace stale state
+  /// cleanly.
+  func applyParsedIntent(_ intent: ActionIntent) {
     self.intent = intent
     self.selectedIntegration = intent.targetIntegration
     self.editableTitle = intent.title
@@ -63,6 +139,8 @@ final class ActionConfirmationViewModel: ObservableObject {
     let minutes = intent.duration ?? 60
     self.editableStartDate = parsedStart
     self.editableEndDate = parsedStart.addingTimeInterval(Double(minutes) * 60)
+    self.isParsing = false
+    Task { await loadLists() }
   }
 
   private static func defaultEventStart() -> Date {
@@ -167,17 +245,18 @@ final class ActionConfirmationViewModel: ObservableObject {
     }
 
     do {
+      let externalID: String
       switch selectedIntegration {
       case .appleReminders:
-        _ = try await IOSRemindersAdapter.createReminder(finalIntent)
+        externalID = try await IOSRemindersAdapter.createReminder(finalIntent)
       case .calendar:
-        _ = try await IOSCalendarAdapter.createEvent(finalIntent)
+        externalID = try await IOSCalendarAdapter.createEvent(finalIntent)
       case .todoist:
-        _ = try await IOSTodoistAdapter.createTask(finalIntent)
+        externalID = try await IOSTodoistAdapter.createTask(finalIntent)
       case .gmail:
-        _ = try await IOSGmailAdapter.createDraft(finalIntent)
+        externalID = try await IOSGmailAdapter.createDraft(finalIntent)
       case .googleCalendar:
-        _ = try await IOSGoogleCalendarAdapter.createEvent(finalIntent)
+        externalID = try await IOSGoogleCalendarAdapter.createEvent(finalIntent)
       default:
         throw IOSActionError.invalidResponse(selectedIntegration.rawValue)
       }
@@ -185,7 +264,8 @@ final class ActionConfirmationViewModel: ObservableObject {
       completion = Completion(
         kind: .created,
         integration: selectedIntegration,
-        title: completionDisplayTitle(for: finalIntent)
+        title: completionDisplayTitle(for: finalIntent),
+        externalID: externalID
       )
       return .succeeded
     } catch {
@@ -198,7 +278,8 @@ final class ActionConfirmationViewModel: ObservableObject {
         completion = Completion(
           kind: .queued,
           integration: selectedIntegration,
-          title: completionDisplayTitle(for: finalIntent)
+          title: completionDisplayTitle(for: finalIntent),
+          externalID: nil
         )
         return .queued
       }
@@ -221,16 +302,17 @@ final class ActionConfirmationViewModel: ObservableObject {
 /// platforms read as the same product. Adapts to light/dark via
 /// `colorScheme` — every color is either a system color or pulled from
 /// the integration tint catalog.
+///
+/// Lifecycle: the view-model is owned by `ContentView` (not the sheet)
+/// so it can be populated *before* the LLM parse completes — the sheet
+/// opens during `phase == .actionParsing` with the transcript visible
+/// in HEARD and a parsing placeholder where WILL DO will be. When the
+/// parse lands, ContentView calls `applyParsedIntent` and the form
+/// fields fade in.
 struct ActionConfirmationSheet: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.colorScheme) private var colorScheme
-  @StateObject var vm: ActionConfirmationViewModel
-  let rawTranscript: String
-
-  init(intent: ActionIntent, rawTranscript: String = "") {
-    _vm = StateObject(wrappedValue: ActionConfirmationViewModel(intent: intent))
-    self.rawTranscript = rawTranscript
-  }
+  @ObservedObject var vm: ActionConfirmationViewModel
 
   var body: some View {
     ZStack {
@@ -238,7 +320,7 @@ struct ActionConfirmationSheet: View {
         .ignoresSafeArea()
 
       if let completion = vm.completion {
-        CompletionBadgeView(completion: completion)
+        CompletionBadgeView(completion: completion, onTap: { _ in dismiss() })
           .padding(.horizontal, 18)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
           .transition(.scale(scale: 0.92).combined(with: .opacity))
@@ -263,7 +345,11 @@ struct ActionConfirmationSheet: View {
             integrationChipRow
             header
             heardSection
-            willDoSection
+            if vm.isParsing {
+              parsingCard
+            } else {
+              willDoSection
+            }
             footer
           }
           .padding(18)
@@ -272,6 +358,7 @@ struct ActionConfirmationSheet: View {
       }
     }
     .animation(.spring(duration: 0.35, bounce: 0.18), value: vm.completion)
+    .animation(.spring(duration: 0.35, bounce: 0.20), value: vm.isParsing)
     .presentationDetents([.medium, .large])
     .presentationDragIndicator(.visible)
     .presentationBackground(.clear)
@@ -364,16 +451,69 @@ struct ActionConfirmationSheet: View {
 
   @ViewBuilder
   private var heardSection: some View {
-    if !rawTranscript.isEmpty {
+    if !vm.rawTranscript.isEmpty {
       VStack(alignment: .leading, spacing: 6) {
         sectionLabel("HEARD")
-        Text("\u{201C}\(rawTranscript)\u{201D}")
+        Text("\u{201C}\(vm.rawTranscript)\u{201D}")
           .font(.system(size: 13))
           .foregroundStyle(primaryTextColor.opacity(0.85))
           .lineSpacing(2)
           .frame(maxWidth: .infinity, alignment: .leading)
           .fixedSize(horizontal: false, vertical: true)
+          .transition(.opacity)
       }
+    }
+  }
+
+  // MARK: - Parsing placeholder
+
+  /// Replaces the WILL DO card while the LLM is still resolving the
+  /// intent. Same shape as the WILL DO card so the swap-in doesn't
+  /// jolt the layout — three skeleton rows + an animated "Parsing
+  /// your action…" caption.
+  private var parsingCard: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      sectionLabel("PARSING")
+      VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 10) {
+          ProgressView()
+            .controlSize(.small)
+            .tint(.purple)
+          Text("Quill is parsing your action…")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(primaryTextColor.opacity(0.8))
+          Spacer(minLength: 0)
+        }
+        .padding(12)
+        Divider().opacity(0.2)
+        VStack(spacing: 10) {
+          skeletonRow(width: 140)
+          skeletonRow(width: 96)
+          skeletonRow(width: 180)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+      }
+      .background(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(cardFill)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .strokeBorder(cardStroke, lineWidth: 0.5)
+      )
+    }
+  }
+
+  private func skeletonRow(width: CGFloat) -> some View {
+    HStack(spacing: 10) {
+      Capsule()
+        .fill(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
+        .frame(width: 16, height: 12)
+      Capsule()
+        .fill(Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06))
+        .frame(width: width, height: 12)
+      Spacer()
     }
   }
 
@@ -593,7 +733,7 @@ struct ActionConfirmationSheet: View {
   }
 
   private var executeDisabled: Bool {
-    if vm.isExecuting { return true }
+    if vm.isExecuting || vm.isParsing { return true }
     if vm.selectedIntegration == .gmail {
       return vm.editableSubject.isEmpty
     }
@@ -732,9 +872,23 @@ private struct EditableRow<Content: View>: View {
 /// Replaces the panel content with a single "Added to <Integration>"
 /// confirmation. Stays on screen briefly before the sheet dismisses,
 /// so the user has visible proof the action actually went through.
+/// Tapping the integration pill deep-links into the integration's
+/// app — to the specific item when the integration's URL scheme
+/// supports per-item links, otherwise to the app root.
 struct CompletionBadgeView: View {
   let completion: ActionConfirmationViewModel.Completion
+  /// Called after a successful deep-link tap so the host can dismiss
+  /// the sheet without waiting for the auto-dismiss timer.
+  let onTap: (URL) -> Void
   @Environment(\.colorScheme) private var colorScheme
+
+  init(
+    completion: ActionConfirmationViewModel.Completion,
+    onTap: @escaping (URL) -> Void = { _ in }
+  ) {
+    self.completion = completion
+    self.onTap = onTap
+  }
 
   var body: some View {
     VStack(spacing: 16) {
@@ -762,21 +916,63 @@ struct CompletionBadgeView: View {
           .lineLimit(2)
       }
 
-      // Small pill that mirrors the macOS post-paste confirmation toast.
-      HStack(spacing: 6) {
-        Image(systemName: integrationIcon)
-          .font(.caption.weight(.semibold))
-        Text(pillText)
-          .font(.subheadline.weight(.medium))
-      }
-      .foregroundStyle(.white)
-      .padding(.horizontal, 14)
-      .padding(.vertical, 8)
-      .background(Capsule().fill(integrationColor))
+      openInButton
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(headline). \(subhead)")
+    .accessibilityLabel("\(headline). \(subhead). \(deepLinkURL == nil ? "" : "Tap to open in \(integrationName).")")
+  }
+
+  /// Tappable pill that deep-links to the integration's app. Falls
+  /// back to a plain pill (no tap target) when no URL scheme is
+  /// available — e.g. queued items have no externalID yet, and not
+  /// every integration ships a URL scheme on iOS. The visual stays
+  /// the same; the chevron is just a subtle hint when the tap works.
+  @ViewBuilder
+  private var openInButton: some View {
+    let url = deepLinkURL
+    if let url {
+      Button {
+        UISelectionFeedbackGenerator().selectionChanged()
+        UIApplication.shared.open(url, options: [:]) { _ in
+          onTap(url)
+        }
+      } label: {
+        pillContent(showChevron: true)
+      }
+      .buttonStyle(.plain)
+    } else {
+      pillContent(showChevron: false)
+    }
+  }
+
+  private func pillContent(showChevron: Bool) -> some View {
+    HStack(spacing: 6) {
+      Image(systemName: integrationIcon)
+        .font(.caption.weight(.semibold))
+      Text(pillText)
+        .font(.subheadline.weight(.medium))
+      if showChevron {
+        Image(systemName: "arrow.up.right.square.fill")
+          .font(.caption.weight(.bold))
+          .opacity(0.85)
+      }
+    }
+    .foregroundStyle(.white)
+    .padding(.horizontal, 14)
+    .padding(.vertical, 8)
+    .background(Capsule().fill(integrationColor))
+  }
+
+  /// URL scheme map. Per-item deep links exist for some integrations
+  /// (Things, Linear) but not these — our adapters return EventKit
+  /// identifiers / Todoist task IDs which don't compose into a deep
+  /// link without an extra round-trip. App-root deep links are still
+  /// useful: tapping "Added to Reminders" pops you straight into the
+  /// Reminders app where the new item is at the top of the list.
+  private var deepLinkURL: URL? {
+    guard completion.kind == .created else { return nil }
+    return IntegrationDeepLink.appRoot(for: completion.integration)
   }
 
   private var badgeTint: Color {

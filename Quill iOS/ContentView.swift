@@ -493,7 +493,7 @@ struct ContentView: View {
       }
       .sheet(isPresented: $showingActionConfirmation) {
         if let intent = vm.parsedIntent {
-          ActionConfirmationSheet(intent: intent)
+          ActionConfirmationSheet(intent: intent, rawTranscript: vm.rawTranscript)
         }
       }
       .onAppear {

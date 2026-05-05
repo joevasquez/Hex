@@ -33,6 +33,8 @@ Xcode generates a stub `QuillKeyboard/` folder with a stub
    - `KeyboardRootView.swift`
    - `KeyboardRecordingViewModel.swift`
    - `AIEnhanceClient.swift`
+   - `KeyboardActionParser.swift`
+   - `KeyboardRemindersClient.swift`
    - `Info.plist`
    - `QuillKeyboard.entitlements`
    - **Copy items if needed:** off
@@ -91,7 +93,26 @@ keys, both targets share a keychain access group.
 If you skip this step, the keyboard still works — it just falls back
 to inserting the raw transcript and the Enhance toggle is greyed out.
 
-## 5. Embed Foundation Extensions
+## 5. Reminders entitlement (Action mode)
+
+Action mode in the keyboard creates Apple Reminders via EventKit. The
+extension's Info.plist already declares `NSRemindersUsageDescription`,
+so the system will surface the prompt the first time the user dictates
+an action — *but only if* the parent app has also been granted
+Reminders access.
+
+In practice this means:
+
+1. The user grants Reminders access in the main `Quill iOS` app first
+   (it's already prompted by the in-app Action mode).
+2. The keyboard reuses the same TCC grant. iOS treats the keyboard as
+   part of the parent app's bundle for purposes of Reminders access.
+
+If the keyboard is the *first* surface to ask for Reminders (uncommon
+but possible), iOS will surface the system prompt above the keyboard
+on the first action attempt.
+
+## 6. Embed Foundation Extensions
 
 Verify the main `Quill iOS` target embeds the keyboard automatically:
 
@@ -100,7 +121,7 @@ Verify the main `Quill iOS` target embeds the keyboard automatically:
    add the keyboard target). `QuillKeyboard.appex` should be listed.
    If not, `+` → add it. Code Sign On Copy: on.
 
-## 6. Verify
+## 7. Verify
 
 1. Scheme picker → `Quill iOS` → Run on a real device (the simulator
    doesn't have a microphone for keyboard extensions).
@@ -115,7 +136,7 @@ Verify the main `Quill iOS` target embeds the keyboard automatically:
 6. Toggle **Enhance** on, dictate again. The text should be polished
    to match the surrounding context.
 
-## 7. TestFlight
+## 8. TestFlight
 
 Archive the `Quill iOS` scheme as usual (`bash tools/scripts/testflight.sh`).
 Xcode automatically embeds the keyboard extension into the archived

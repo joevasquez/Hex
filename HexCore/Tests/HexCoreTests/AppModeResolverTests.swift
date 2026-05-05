@@ -98,4 +98,50 @@ struct AppModeResolverTests {
     )
     #expect(result == .code)
   }
+
+  /// Custom rules are an explicit per-app opt-in, so they should fire
+  /// even when the global "Auto-select mode by app" toggle is off.
+  /// Otherwise users who add a rule and leave the toggle off would
+  /// hit a silent no-op.
+  @Test
+  func customRulesFireEvenWhenContextAwareDisabled() {
+    let customRule = AppModeRule(
+      bundleIdentifier: "com.mycompany.internal",
+      appName: "InternalApp",
+      mode: .code
+    )
+    let result = AppModeResolver.resolve(
+      bundleID: "com.mycompany.internal",
+      customRules: [customRule],
+      contextAwareEnabled: false
+    )
+    #expect(result == .code)
+  }
+
+  /// Built-in heuristics still need the toggle on. Custom rules
+  /// being independent of the toggle should NOT inadvertently turn on
+  /// the auto-mapping for apps the user never explicitly opted into.
+  @Test
+  func builtInHeuristicsRequireContextAwareToggle() {
+    let result = AppModeResolver.resolve(
+      bundleID: "com.apple.mail",
+      customRules: [],
+      contextAwareEnabled: false
+    )
+    #expect(result == nil)
+  }
+
+  /// Empty bundleIdentifier shouldn't accidentally match a freshly
+  /// added (unconfigured) rule against an app with no bundleID. Empty
+  /// rules are placeholders the user is mid-editing.
+  @Test
+  func emptyCustomRuleDoesNotMatchNilBundleID() {
+    let blank = AppModeRule(bundleIdentifier: "", appName: "", mode: .clean)
+    let result = AppModeResolver.resolve(
+      bundleID: nil,
+      customRules: [blank],
+      contextAwareEnabled: true
+    )
+    #expect(result == nil)
+  }
 }

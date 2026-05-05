@@ -424,6 +424,10 @@ struct ActionConfirmationView: View {
 /// long enough to register before the panel dismisses, so the user has
 /// visible proof the action actually went through. Shape mirrors the
 /// iOS sheet's `CompletionBadgeView`.
+///
+/// Tapping the integration pill deep-links into the integration's app
+/// (when its URL scheme is supported on macOS — e.g. Todoist, Notion,
+/// Things, Reminders all register their schemes).
 struct ActionCompletionBadgeView: View {
   let completion: ActionConfirmationFeature.State.Completion
 
@@ -453,20 +457,52 @@ struct ActionCompletionBadgeView: View {
           .lineLimit(2)
       }
 
-      HStack(spacing: 6) {
-        Image(systemName: integrationIcon)
-          .font(.system(size: 11, weight: .semibold))
-        Text(pillText)
-          .font(.system(size: 12, weight: .semibold))
-      }
-      .foregroundStyle(.white)
-      .padding(.horizontal, 12)
-      .padding(.vertical, 6)
-      .background(Capsule().fill(integrationColor))
+      openInPill
     }
     .padding(.horizontal, 24)
     .padding(.vertical, 32)
     .frame(maxWidth: .infinity)
+  }
+
+  /// Tappable when there's a deep link to open, plain pill otherwise.
+  /// The chevron-square glyph is the only visual change between the
+  /// two — the rest of the layout stays identical so the badge size
+  /// doesn't shift between integrations.
+  @ViewBuilder
+  private var openInPill: some View {
+    if let url = deepLinkURL {
+      Button {
+        NSWorkspace.shared.open(url)
+      } label: {
+        pillContent(showChevron: true)
+      }
+      .buttonStyle(.plain)
+    } else {
+      pillContent(showChevron: false)
+    }
+  }
+
+  private func pillContent(showChevron: Bool) -> some View {
+    HStack(spacing: 6) {
+      Image(systemName: integrationIcon)
+        .font(.system(size: 11, weight: .semibold))
+      Text(pillText)
+        .font(.system(size: 12, weight: .semibold))
+      if showChevron {
+        Image(systemName: "arrow.up.right.square.fill")
+          .font(.system(size: 11, weight: .bold))
+          .opacity(0.85)
+      }
+    }
+    .foregroundStyle(.white)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 6)
+    .background(Capsule().fill(integrationColor))
+  }
+
+  private var deepLinkURL: URL? {
+    guard completion.kind == .created else { return nil }
+    return IntegrationDeepLink.appRoot(for: completion.integration)
   }
 
   private var badgeTint: Color {

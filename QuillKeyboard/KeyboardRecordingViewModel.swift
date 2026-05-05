@@ -20,10 +20,26 @@ final class KeyboardRecordingViewModel: ObservableObject {
     case requestingPermission
     case recording
     case enhancing
+    /// Action mode: parsing the transcript through the LLM into a
+    /// `KeyboardActionIntent`.
+    case parsingAction
+    /// Action mode: a Reminder has been created. Held for ~1.6s so
+    /// the success card stays visible before the keyboard returns to
+    /// idle. Carries the created title for the badge label.
+    case actionDone(title: String)
     case error(String)
   }
 
+  /// Two top-level keyboard modes. Dictate inserts text into the host
+  /// field; Action parses the dictation and creates an Apple Reminder
+  /// (no host insertion — the reminder is the output).
+  enum Mode: String, CaseIterable {
+    case dictate
+    case action
+  }
+
   @Published var phase: Phase = .idle
+  @Published var mode: Mode = .dictate
   @Published var partialTranscript: String = ""
   @Published var meterLevel: Float = 0
   @Published var enhanceEnabled: Bool = false
@@ -110,13 +126,22 @@ final class KeyboardRecordingViewModel: ObservableObject {
     switch phase {
     case .recording:
       await stopAndCommit()
-    case .idle, .error:
+    case .idle, .error, .actionDone:
       await start()
-    case .requestingPermission, .enhancing:
+    case .requestingPermission, .enhancing, .parsingAction:
       // Ignore taps mid-permission / mid-AI; the UI already shows a
       // spinner so the user isn't expecting another response.
       break
     }
+  }
+
+  /// Toggle between Dictate and Action mode. Cancels any in-flight
+  /// recording so the user can't accidentally land in the wrong mode
+  /// — better to drop the (mid-stream) audio than insert text into
+  /// the wrong destination.
+  func toggleMode() {
+    cancelIfNeeded()
+    mode = mode == .dictate ? .action : .dictate
   }
 
   func cancelIfNeeded() {
@@ -154,18 +179,74 @@ final class KeyboardRecordingViewModel: ObservableObject {
       return
     }
 
+    switch mode {
+    case .dictate:
+      await commitDictate(transcript: trimmed)
+    case .action:
+      await commitAction(transcript: trimmed)
+    }
+  }
+
+  // MARK: - Dictate-mode commit
+
+  private func commitDictate(transcript: String) async {
     let toInsert: String
     if enhanceEnabled, hasOpenAccess {
       phase = .enhancing
       refreshHostContext()
-      toInsert = await enhanceWithAI(transcript: trimmed) ?? trimmed
+      toInsert = await enhanceWithAI(transcript: transcript) ?? transcript
     } else {
-      toInsert = trimmed
+      toInsert = transcript
     }
-
     insertIntoHost(toInsert)
     phase = .idle
     partialTranscript = ""
+  }
+
+  // MARK: - Action-mode commit
+
+  /// Parses the transcript via the user's AI provider, then creates
+  /// the corresponding Apple Reminder via EventKit. On any failure
+  /// (no API key, parse error, EventKit denied, etc.) we fall back to
+  /// inserting the raw transcript so the user's words aren't lost —
+  /// they can then re-dictate or hand-type from there.
+  private func commitAction(transcript: String) async {
+    guard hasOpenAccess else {
+      // Action mode requires network for parsing + shared keychain for
+      // API keys. Without Open Access, fall back to inserting the raw
+      // transcript so the user still gets value from their dictation.
+      insertIntoHost(transcript)
+      phase = .error("Action needs Full Access. Inserted text instead.")
+      partialTranscript = ""
+      return
+    }
+    phase = .parsingAction
+    do {
+      let intent = try await KeyboardActionParser.parse(transcript: transcript)
+      let created = try await KeyboardRemindersClient.create(intent)
+      phase = .actionDone(title: created.title)
+      partialTranscript = ""
+      // Hold the success card briefly, then drop back to idle.
+      Task { @MainActor in
+        try? await Task.sleep(for: .milliseconds(1600))
+        if case .actionDone = phase {
+          phase = .idle
+        }
+      }
+    } catch {
+      // Soft fallback — the user dictated something, give them their
+      // words. The error message gets shown for ~2.5 s in the
+      // transcript area before phase resets.
+      insertIntoHost(transcript)
+      phase = .error("Couldn't create reminder. Inserted text instead.")
+      partialTranscript = ""
+      Task { @MainActor in
+        try? await Task.sleep(for: .milliseconds(2500))
+        if case .error = phase {
+          phase = .idle
+        }
+      }
+    }
   }
 
   private func insertIntoHost(_ text: String) {

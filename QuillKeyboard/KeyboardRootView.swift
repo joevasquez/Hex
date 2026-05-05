@@ -52,8 +52,56 @@ struct KeyboardRootView: View {
 
       Spacer()
 
-      enhanceToggle
+      modePicker
+      // Enhance only applies to Dictate mode. In Action mode the
+      // dictation is going to the parser, not the host field — the
+      // toggle would be misleading.
+      if viewModel.mode == .dictate {
+        enhanceToggle
+      }
     }
+  }
+
+  /// Two-pill segmented control: Dictate vs Action. Visually echoes
+  /// the macOS HUD's mode chip + the iOS app's mode dropdown so users
+  /// recognize "this is the same Quill thinking about modes" across
+  /// surfaces.
+  private var modePicker: some View {
+    HStack(spacing: 4) {
+      modeChip(.dictate, icon: "mic.fill", label: "Dictate")
+      modeChip(.action, icon: "bolt.fill", label: "Action")
+    }
+    .padding(3)
+    .background(Capsule().fill(.white.opacity(0.10)))
+    .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Keyboard mode. Currently \(viewModel.mode == .dictate ? "Dictate" : "Action").")
+  }
+
+  private func modeChip(
+    _ mode: KeyboardRecordingViewModel.Mode,
+    icon: String,
+    label: String
+  ) -> some View {
+    let selected = viewModel.mode == mode
+    return Button {
+      guard !selected else { return }
+      viewModel.toggleMode()
+    } label: {
+      HStack(spacing: 4) {
+        Image(systemName: icon)
+          .font(.system(size: 10, weight: .bold))
+        Text(label)
+          .font(.system(size: 11, weight: .semibold))
+      }
+      .padding(.horizontal, 9)
+      .padding(.vertical, 5)
+      .foregroundStyle(selected ? Color(red: 0.36, green: 0.28, blue: 0.74) : Color.white)
+      .background(
+        Capsule().fill(selected ? Color.white.opacity(0.95) : Color.clear)
+      )
+    }
+    .buttonStyle(.plain)
   }
 
   /// Mirrors the AI mode dropdown on the main iOS screen — a small
@@ -143,6 +191,10 @@ struct KeyboardRootView: View {
         }
       case .enhancing:
         statusLabel("Enhancing…", icon: "sparkles")
+      case .parsingAction:
+        statusLabel("Creating reminder…", icon: "bolt.fill")
+      case .actionDone(let title):
+        actionSuccessCard(title: title)
       case .error(let msg):
         statusLabel(msg, icon: "exclamationmark.triangle")
       }
@@ -151,7 +203,42 @@ struct KeyboardRootView: View {
   }
 
   private var idleHint: String {
-    "Tap to dictate. Inserts at the cursor."
+    switch viewModel.mode {
+    case .dictate: "Tap to dictate. Inserts at the cursor."
+    case .action: "Tap to dictate an action. Creates a Reminder."
+    }
+  }
+
+  /// Mini "this just happened" card — green check + reminder title.
+  /// Mirrors the iOS sheet's CompletionBadgeView at a smaller size so
+  /// the keyboard's success state reads as part of the same product
+  /// language. No host insertion in Action mode; the reminder *is*
+  /// the output, so this card is the user's confirmation.
+  ///
+  /// We deliberately don't deep-link to Reminders here —
+  /// `UIApplication.shared.open` isn't allowed from app extensions,
+  /// and the responder-chain workaround is fragile. The user will
+  /// find their reminder the next time they open the Reminders app.
+  private func actionSuccessCard(title: String) -> some View {
+    HStack(spacing: 10) {
+      ZStack {
+        Circle().fill(Color.green).frame(width: 32, height: 32)
+        Image(systemName: "checkmark")
+          .font(.system(size: 14, weight: .bold))
+          .foregroundStyle(.white)
+      }
+      VStack(alignment: .leading, spacing: 1) {
+        Text("Reminder created")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(.white)
+        Text(title)
+          .font(.system(size: 13))
+          .foregroundStyle(.white.opacity(0.85))
+          .lineLimit(1)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 14)
   }
 
   private func statusLabel(_ text: String, icon: String) -> some View {
@@ -209,10 +296,12 @@ struct KeyboardRootView: View {
 
   /// The mic button is the keyboard's main affordance. Recording state
   /// flips the gradient red so it's clear a tap will stop the recording
-  /// and insert the result.
+  /// and insert (or, in Action mode, parse) the result.
   private var micButton: some View {
     let recording = viewModel.phase == .recording
-    let busy = viewModel.phase == .enhancing || viewModel.phase == .requestingPermission
+    let busy = viewModel.phase == .enhancing
+      || viewModel.phase == .requestingPermission
+      || viewModel.phase == .parsingAction
     return Button {
       Task { await viewModel.toggleRecording() }
     } label: {
@@ -240,10 +329,10 @@ struct KeyboardRootView: View {
             ProgressView()
               .tint(recording ? .white : .purple)
           } else {
-            Image(systemName: recording ? "stop.fill" : "mic.fill")
+            Image(systemName: micGlyph)
               .font(.system(size: 20, weight: .bold))
           }
-          Text(recording ? "Stop" : "Dictate")
+          Text(micLabel)
             .font(.system(size: 16, weight: .semibold))
         }
         .foregroundStyle(recording ? Color.white : Color(red: 0.36, green: 0.28, blue: 0.74))
@@ -251,7 +340,36 @@ struct KeyboardRootView: View {
     }
     .buttonStyle(.plain)
     .disabled(busy)
-    .accessibilityLabel(recording ? "Stop dictating and insert" : "Start dictating")
+    .accessibilityLabel(micAccessibilityLabel)
+  }
+
+  private var micGlyph: String {
+    if viewModel.phase == .recording { return "stop.fill" }
+    return viewModel.mode == .action ? "bolt.fill" : "mic.fill"
+  }
+
+  private var micLabel: String {
+    switch viewModel.phase {
+    case .recording: "Stop"
+    default:
+      switch viewModel.mode {
+      case .dictate: "Dictate"
+      case .action: "Action"
+      }
+    }
+  }
+
+  private var micAccessibilityLabel: String {
+    switch viewModel.phase {
+    case .recording:
+      return viewModel.mode == .action
+        ? "Stop and create reminder"
+        : "Stop dictating and insert"
+    default:
+      return viewModel.mode == .action
+        ? "Start dictating an action"
+        : "Start dictating"
+    }
   }
 }
 

@@ -281,11 +281,15 @@ struct SettingsView: View {
           Button("Done") { dismiss() }
         }
       }
-      .onAppear { loadKey() }
-      .onChange(of: aiProviderRaw) { _, _ in
+      .onAppear {
+        loadKey()
+        mirrorProviderToAppGroup(aiProviderRaw)
+      }
+      .onChange(of: aiProviderRaw) { _, newValue in
         apiKeyText = ""
         apiKeySaved = false
         loadKey()
+        mirrorProviderToAppGroup(newValue)
       }
       .task {
         offlineQueueCount = await ActionQueueManager.shared.snapshot().count
@@ -324,6 +328,15 @@ struct SettingsView: View {
     let (roundTrip, readStatus) = KeychainStore.read(account: keychainKey)
     print("SettingsView.saveKey: save=\(status) readBack=\(readStatus) roundTripLen=\(roundTrip?.count ?? -1)")
     apiKeySaved = (status == errSecSuccess) && (roundTrip == key)
+  }
+
+  /// Mirror the active AI provider into the App Group's UserDefaults so
+  /// the keyboard extension can read the user's choice (it doesn't have
+  /// access to the main app's `UserDefaults.standard`). Cheap — fires
+  /// only on settings open + when the user changes provider.
+  private func mirrorProviderToAppGroup(_ raw: String) {
+    let suite = UserDefaults(suiteName: "group.com.joevasquez.Quill")
+    suite?.set(raw, forKey: QuillIOSSettingsKey.aiProvider)
   }
 
   // MARK: - AI Modes (built-in visibility)

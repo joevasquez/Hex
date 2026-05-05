@@ -20,15 +20,24 @@ struct ActionConfirmationView: View {
   @ObserveInjection var inject
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
-      header
-      heardSection
-      willDoSection
-      Spacer(minLength: 0)
-      footer
+    ZStack {
+      if let completion = store.completion {
+        ActionCompletionBadgeView(completion: completion)
+          .transition(.scale(scale: 0.92).combined(with: .opacity))
+      } else {
+        VStack(alignment: .leading, spacing: 14) {
+          header
+          heardSection
+          willDoSection
+          Spacer(minLength: 0)
+          footer
+        }
+        .padding(18)
+      }
     }
-    .padding(18)
     .frame(width: 380)
+    .frame(minHeight: 280)
+    .animation(.spring(duration: 0.32, bounce: 0.18), value: store.completion)
     .background(
       RoundedRectangle(cornerRadius: 14, style: .continuous)
         .fill(.ultraThinMaterial)
@@ -405,6 +414,109 @@ struct ActionConfirmationView: View {
   private func integrationTint(_ id: Integration.Identifier) -> Color {
     let hex = Integration.all.first { $0.identifier == id }?.tintHex
     return Color(hex: hex ?? "") ?? .orange
+  }
+}
+
+// MARK: - Completion badge
+
+/// Replaces the panel content with a brief "Added to <Integration>"
+/// confirmation after a successful (or queued) action. Stays on screen
+/// long enough to register before the panel dismisses, so the user has
+/// visible proof the action actually went through. Shape mirrors the
+/// iOS sheet's `CompletionBadgeView`.
+struct ActionCompletionBadgeView: View {
+  let completion: ActionConfirmationFeature.State.Completion
+
+  var body: some View {
+    VStack(spacing: 14) {
+      ZStack {
+        Circle()
+          .fill(badgeTint.opacity(0.22))
+          .frame(width: 78, height: 78)
+        Circle()
+          .fill(badgeTint)
+          .frame(width: 58, height: 58)
+        Image(systemName: badgeIcon)
+          .font(.system(size: 26, weight: .bold))
+          .foregroundStyle(.white)
+      }
+      .accessibilityHidden(true)
+
+      VStack(spacing: 3) {
+        Text(headline)
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundStyle(.white)
+        Text(subhead)
+          .font(.system(size: 12))
+          .foregroundStyle(.white.opacity(0.7))
+          .multilineTextAlignment(.center)
+          .lineLimit(2)
+      }
+
+      HStack(spacing: 6) {
+        Image(systemName: integrationIcon)
+          .font(.system(size: 11, weight: .semibold))
+        Text(pillText)
+          .font(.system(size: 12, weight: .semibold))
+      }
+      .foregroundStyle(.white)
+      .padding(.horizontal, 12)
+      .padding(.vertical, 6)
+      .background(Capsule().fill(integrationColor))
+    }
+    .padding(.horizontal, 24)
+    .padding(.vertical, 32)
+    .frame(maxWidth: .infinity)
+  }
+
+  private var badgeTint: Color {
+    switch completion.kind {
+    case .created: .green
+    case .queued: .orange
+    }
+  }
+
+  private var badgeIcon: String {
+    switch completion.kind {
+    case .created: "checkmark"
+    case .queued: "wifi.exclamationmark"
+    }
+  }
+
+  private var headline: String {
+    switch completion.kind {
+    case .created: "Done"
+    case .queued: "Saved offline"
+    }
+  }
+
+  private var subhead: String {
+    switch completion.kind {
+    case .created: "\u{201C}\(completion.title)\u{201D}"
+    case .queued: "Will retry when you're back online."
+    }
+  }
+
+  private var pillText: String {
+    switch completion.kind {
+    case .created: "Added to \(integrationName)"
+    case .queued: "Queued for \(integrationName)"
+    }
+  }
+
+  private var integrationName: String {
+    Integration.all.first { $0.identifier == completion.integration }?.name
+      ?? completion.integration.rawValue
+  }
+
+  private var integrationIcon: String {
+    Integration.all.first { $0.identifier == completion.integration }?.systemImage
+      ?? "checkmark.circle.fill"
+  }
+
+  private var integrationColor: Color {
+    let hex = Integration.all.first { $0.identifier == completion.integration }?.tintHex
+    return Color(hex: hex ?? "") ?? .purple
   }
 }
 

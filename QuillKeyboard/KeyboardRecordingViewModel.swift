@@ -2,9 +2,25 @@
 //  KeyboardRecordingViewModel.swift
 //  QuillKeyboard
 //
-//  Owns the keyboard extension's recording + transcription pipeline.
-//  Uses AVAudioEngine + SFSpeechRecognizer (on-device when possible)
-//  because keyboard extensions are too memory-constrained for WhisperKit.
+//  iOS keyboard extensions are non-focal processes and the OS denies them
+//  audio input access regardless of Full Access / mic / speech permissions
+//  (CoreAudio surfaces this as 'what' / 2003329396 from AURemoteIO_StartIO,
+//  or as `record()` returning false from AVAudioRecorder). Both AVAudioEngine
+//  and AVAudioRecorder hit the same wall.
+//
+//  Workaround: the keyboard never records audio. When the user taps Dictate,
+//  the keyboard:
+//    1. Writes a `KeyboardBridge.Request` to the App Group mailbox.
+//    2. Opens the parent Quill app via the `quill://keyboard?id=…&mode=…`
+//       deep link.
+//    3. Stays dormant. The parent app (a focal process) records, transcribes,
+//       and writes a `KeyboardBridge.Result` back to the App Group.
+//    4. On every reappearance — `checkForBridgeResult()` is called from the
+//       input view controller's `viewWillAppear` and `textDidChange` — the
+//       keyboard reads the pending result, validates the request id matches,
+//       inserts the transcript at the cursor, and clears the mailbox.
+//
+//  This is the same pattern Gboard / SwiftKey use for voice typing.
 //
 
 import AVFoundation
@@ -17,22 +33,16 @@ import UIKit
 final class KeyboardRecordingViewModel: ObservableObject {
   enum Phase: Equatable {
     case idle
-    case requestingPermission
-    case recording
+    /// User tapped Dictate; we've opened the parent app and are waiting
+    /// for them to return. Reused as a "still expecting a result" state
+    /// across keyboard reappearances until either a result lands or the
+    /// user dismisses the request.
+    case awaitingApp
     case enhancing
-    /// Action mode: parsing the transcript through the LLM into a
-    /// `KeyboardActionIntent`.
-    case parsingAction
-    /// Action mode: a Reminder has been created. Held for ~1.6s so
-    /// the success card stays visible before the keyboard returns to
-    /// idle. Carries the created title for the badge label.
     case actionDone(title: String)
     case error(String)
   }
 
-  /// Two top-level keyboard modes. Dictate inserts text into the host
-  /// field; Action parses the dictation and creates an Apple Reminder
-  /// (no host insertion — the reminder is the output).
   enum Mode: String, CaseIterable {
     case dictate
     case action
@@ -42,43 +52,70 @@ final class KeyboardRecordingViewModel: ObservableObject {
   @Published var mode: Mode = .dictate
   @Published var partialTranscript: String = ""
   @Published var meterLevel: Float = 0
-  @Published var enhanceEnabled: Bool = false
-  /// Context the host app currently has around the cursor — used to
-  /// enrich the AI cleanup prompt so the model knows whether you're
-  /// dictating into a Slack reply, an email body, or a search field.
+  /// Persisted to App Group UserDefaults so the toggle survives the
+  /// frequent keyboard-process restarts iOS does when the user switches
+  /// apps. Without persistence, every Dictate flow that round-trips
+  /// through the parent app starts with Enhance off, which silently
+  /// strips the LLM cleanup users expect.
+  @Published var enhanceEnabled: Bool {
+    didSet {
+      UserDefaults(suiteName: KeyboardBridge.appGroup)?
+        .set(enhanceEnabled, forKey: Self.enhanceToggleKey)
+    }
+  }
+  private static let enhanceToggleKey = "quill.keyboard.enhanceEnabled"
+
+  init() {
+    self.enhanceEnabled = UserDefaults(suiteName: KeyboardBridge.appGroup)?
+      .bool(forKey: Self.enhanceToggleKey) ?? false
+  }
   @Published private(set) var hostContextBefore: String = ""
   @Published private(set) var hostContextAfter: String = ""
-  /// True when "Open Access" is granted — needed for network calls
-  /// (AI cleanup) and also to read the App Group container on devices
-  /// where iOS sandboxes the keyboard more aggressively.
   @Published private(set) var hasOpenAccess: Bool = false
 
-  // Wired in by the input view controller so this VM stays UIKit-free
-  // outside the bind() seam. `UITextDocumentProxy` already conforms to
-  // `UIKeyInput`, so a single protocol reference is enough — and it's
-  // class-bound, so `weak` is allowed.
   private weak var proxy: (any UITextDocumentProxy)?
   private var advanceKeyboardCallback: (() -> Void)?
   private var dismissKeyboardCallback: (() -> Void)?
+  /// Opens a URL via the input view controller's `extensionContext`.
+  /// Provided by `QuillKeyboardController` in `bind`. The closure returns
+  /// `true` if the URL was successfully scheduled for opening.
+  private var openURLCallback: ((URL) -> Void)?
 
-  // Audio
-  private var engine: AVAudioEngine?
-
-  // Speech
-  private var recognizer: SFSpeechRecognizer?
-  private var request: SFSpeechAudioBufferRecognitionRequest?
-  private var task: SFSpeechRecognitionTask?
+  /// Outstanding bridge request id, persisted to App Group UserDefaults
+  /// so it survives keyboard-extension process restarts (which iOS does
+  /// freely whenever the user switches apps). Without persistence, a
+  /// restart wipes the id, the keyboard can't validate incoming results,
+  /// and stale or duplicate results in the mailbox replay as if they
+  /// were new dictations.
+  private static let outstandingIDKey = "quill.keyboard.outstandingRequestID"
+  private var outstandingRequestID: UUID? {
+    get {
+      guard let raw = UserDefaults(suiteName: KeyboardBridge.appGroup)?
+        .string(forKey: Self.outstandingIDKey) else { return nil }
+      return UUID(uuidString: raw)
+    }
+    set {
+      let defaults = UserDefaults(suiteName: KeyboardBridge.appGroup)
+      if let id = newValue {
+        defaults?.set(id.uuidString, forKey: Self.outstandingIDKey)
+      } else {
+        defaults?.removeObject(forKey: Self.outstandingIDKey)
+      }
+    }
+  }
 
   // MARK: - Wiring
 
   func bind(
     proxy: any UITextDocumentProxy,
     advanceToNextKeyboard: @escaping () -> Void,
-    dismissKeyboard: @escaping () -> Void
+    dismissKeyboard: @escaping () -> Void,
+    openURL: @escaping (URL) -> Void
   ) {
     self.proxy = proxy
     self.advanceKeyboardCallback = advanceToNextKeyboard
     self.dismissKeyboardCallback = dismissKeyboard
+    self.openURLCallback = openURL
     refreshHostContext()
     refreshOpenAccess()
   }
@@ -88,106 +125,123 @@ final class KeyboardRecordingViewModel: ObservableObject {
     hostContextAfter = proxy?.documentContextAfterInput ?? ""
   }
 
-  /// "Open Access" is the user-granted permission that lets a custom
-  /// keyboard make network calls and share state with its containing
-  /// app. We probe it via `UIPasteboard.general.hasStrings` — sandboxed
-  /// keyboards can't touch the pasteboard, so a successful read is a
-  /// reliable proxy. Cheap, runs once at bind time.
   private func refreshOpenAccess() {
     hasOpenAccess = UIPasteboard.general.hasStrings
-      || !(UserDefaults(suiteName: "group.com.joevasquez.Quill")?.dictionaryRepresentation().isEmpty ?? true)
+      || !(UserDefaults(suiteName: KeyboardBridge.appGroup)?.dictionaryRepresentation().isEmpty ?? true)
   }
 
   // MARK: - Standard keyboard actions
 
-  func tapBackspace() {
-    proxy?.deleteBackward()
-  }
+  func tapBackspace() { proxy?.deleteBackward() }
+  func tapReturn() { proxy?.insertText("\n") }
+  func tapSpace() { proxy?.insertText(" ") }
+  func tapNextKeyboard() { advanceKeyboardCallback?() }
+  func tapDismissKeyboard() { dismissKeyboardCallback?() }
 
-  func tapReturn() {
-    proxy?.insertText("\n")
-  }
-
-  func tapSpace() {
-    proxy?.insertText(" ")
-  }
-
-  func tapNextKeyboard() {
-    advanceKeyboardCallback?()
-  }
-
-  func tapDismissKeyboard() {
-    dismissKeyboardCallback?()
-  }
-
-  // MARK: - Dictation
+  // MARK: - Dictation (delegated to parent app)
 
   func toggleRecording() async {
     switch phase {
-    case .recording:
-      await stopAndCommit()
+    case .awaitingApp:
+      // Second tap while waiting cancels the outstanding request.
+      cancelIfNeeded()
     case .idle, .error, .actionDone:
-      await start()
-    case .requestingPermission, .enhancing, .parsingAction:
-      // Ignore taps mid-permission / mid-AI; the UI already shows a
-      // spinner so the user isn't expecting another response.
+      triggerHostRecording()
+    case .enhancing:
       break
     }
   }
 
-  /// Toggle between Dictate and Action mode. Cancels any in-flight
-  /// recording so the user can't accidentally land in the wrong mode
-  /// — better to drop the (mid-stream) audio than insert text into
-  /// the wrong destination.
   func toggleMode() {
     cancelIfNeeded()
     mode = mode == .dictate ? .action : .dictate
   }
 
   func cancelIfNeeded() {
-    if phase == .recording {
-      teardownEngine()
+    if phase == .awaitingApp {
+      // Clear the outstanding request from the App Group so the parent
+      // app doesn't process a request the user no longer wants.
+      _ = KeyboardBridge.consumeRequest()
+      _ = KeyboardBridge.consumeResult()
+      outstandingRequestID = nil
       partialTranscript = ""
       phase = .idle
     }
   }
 
-  private func start() async {
-    phase = .requestingPermission
-    let micGranted = await requestMicPermission()
-    let speechGranted = await requestSpeechPermission()
-    guard micGranted, speechGranted else {
-      phase = .error("Microphone & speech access required.")
+  /// Writes a bridge request and asks the input view controller to open
+  /// the parent Quill app. The app reads the request, records as a
+  /// focal process, and writes the result back. We pick it up the next
+  /// time the keyboard reappears (see `checkForBridgeResult`).
+  ///
+  /// Note: an earlier iteration tried `AudioQueueServices` directly here
+  /// to see whether it bypassed the CoreAudio sandbox wall that breaks
+  /// AVAudioEngine and AVAudioRecorder. It also failed — it generated a
+  /// UserFault report (`ExcUserFault_QuillKeyboard.ips`) instead of a
+  /// recoverable OSStatus error, which means iOS denies non-focal
+  /// extension processes audio input at the kernel level. The trampoline
+  /// is the only viable architecture.
+  private func triggerHostRecording() {
+    let bridgeMode: KeyboardBridge.Mode = mode == .dictate ? .dictate : .action
+    let request = KeyboardBridge.Request(mode: bridgeMode)
+    KeyboardBridge.writeRequest(request)
+    outstandingRequestID = request.id
+
+    guard let url = KeyboardBridge.url(for: request) else {
+      phase = .error("Couldn't open Quill app.")
       return
     }
-    do {
-      try beginRecording()
-      phase = .recording
-      partialTranscript = ""
-    } catch {
-      phase = .error("Couldn't start recording: \(error.localizedDescription)")
-    }
+    openURLCallback?(url)
+    phase = .awaitingApp
+    partialTranscript = ""
   }
 
-  private func stopAndCommit() async {
-    let captured = partialTranscript
-    teardownEngine()
+  /// Called by the input view controller when the keyboard becomes
+  /// visible or the host text changes. Reads the bridge mailbox and,
+  /// if a result for our outstanding request is there, inserts it.
+  func checkForBridgeResult() {
+    guard let result = KeyboardBridge.consumeResult() else { return }
+    let age = Date().timeIntervalSince(result.createdAt)
+    if age > 300 {
+      NSLog("[QuillKeyboard] dropping stale bridge result (age=%.0fs)", age)
+      return
+    }
+    // Validate the result corresponds to OUR outstanding request. Any
+    // mismatch — including no outstanding id at all — means the result
+    // is from a previous flow we already handled (or one the user
+    // cancelled). Replaying it would surface as the "previous transcript
+    // pasted again" bug.
+    guard let outstanding = outstandingRequestID, result.id == outstanding else {
+      NSLog("[QuillKeyboard] dropping result with mismatched id (have=%@ outstanding=%@)",
+            result.id.uuidString,
+            outstandingRequestID?.uuidString ?? "nil")
+      return
+    }
+    NSLog("[QuillKeyboard] consumed bridge result: %ld chars", result.transcript.count)
+    outstandingRequestID = nil
 
-    let trimmed = captured.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-      phase = .idle
+    let trimmed = result.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty {
+      // Action mode returns an empty transcript on success — the app
+      // already created the reminder/task. Show a brief confirmation.
+      if mode == .action {
+        phase = .actionDone(title: "Action created")
+        Task { @MainActor in
+          try? await Task.sleep(for: .milliseconds(1600))
+          if case .actionDone = phase { phase = .idle }
+        }
+      } else {
+        phase = .idle
+      }
       return
     }
 
-    switch mode {
-    case .dictate:
+    // Dictate mode (or action fallback): commit the text. Optionally
+    // run AI Enhance first.
+    Task { @MainActor in
       await commitDictate(transcript: trimmed)
-    case .action:
-      await commitAction(transcript: trimmed)
     }
   }
-
-  // MARK: - Dictate-mode commit
 
   private func commitDictate(transcript: String) async {
     let toInsert: String
@@ -203,59 +257,8 @@ final class KeyboardRecordingViewModel: ObservableObject {
     partialTranscript = ""
   }
 
-  // MARK: - Action-mode commit
-
-  /// Parses the transcript via the user's AI provider, then creates
-  /// the corresponding Apple Reminder via EventKit. On any failure
-  /// (no API key, parse error, EventKit denied, etc.) we fall back to
-  /// inserting the raw transcript so the user's words aren't lost —
-  /// they can then re-dictate or hand-type from there.
-  private func commitAction(transcript: String) async {
-    guard hasOpenAccess else {
-      // Action mode requires network for parsing + shared keychain for
-      // API keys. Without Open Access, fall back to inserting the raw
-      // transcript so the user still gets value from their dictation.
-      insertIntoHost(transcript)
-      phase = .error("Action needs Full Access. Inserted text instead.")
-      partialTranscript = ""
-      return
-    }
-    phase = .parsingAction
-    do {
-      let intent = try await KeyboardActionParser.parse(transcript: transcript)
-      let created = try await KeyboardRemindersClient.create(intent)
-      phase = .actionDone(title: created.title)
-      partialTranscript = ""
-      // Hold the success card briefly, then drop back to idle.
-      Task { @MainActor in
-        try? await Task.sleep(for: .milliseconds(1600))
-        if case .actionDone = phase {
-          phase = .idle
-        }
-      }
-    } catch {
-      // Soft fallback — the user dictated something, give them their
-      // words. The error message gets shown for ~2.5 s in the
-      // transcript area before phase resets.
-      insertIntoHost(transcript)
-      phase = .error("Couldn't create reminder. Inserted text instead.")
-      partialTranscript = ""
-      Task { @MainActor in
-        try? await Task.sleep(for: .milliseconds(2500))
-        if case .error = phase {
-          phase = .idle
-        }
-      }
-    }
-  }
-
   private func insertIntoHost(_ text: String) {
     guard let proxy else { return }
-    // Match the spacing the user would expect: if the cursor sits
-    // immediately after a non-whitespace character, add a leading
-    // space; if the inserted text doesn't end with terminal punctuation
-    // and the trailing context starts with a letter, add a trailing
-    // space too.
     let before = proxy.documentContextBeforeInput ?? ""
     let needsLeadingSpace = !before.isEmpty
       && !before.hasSuffix(" ")
@@ -264,139 +267,31 @@ final class KeyboardRecordingViewModel: ObservableObject {
     proxy.insertText(payload)
   }
 
-  // MARK: - Permissions
-
-  private func requestMicPermission() async -> Bool {
-    if #available(iOS 17.0, *) {
-      return await AVAudioApplication.requestRecordPermission()
-    } else {
-      return await withCheckedContinuation { cont in
-        AVAudioSession.sharedInstance().requestRecordPermission { granted in
-          cont.resume(returning: granted)
-        }
-      }
-    }
-  }
-
-  private func requestSpeechPermission() async -> Bool {
-    await withCheckedContinuation { cont in
-      SFSpeechRecognizer.requestAuthorization { status in
-        cont.resume(returning: status == .authorized)
-      }
-    }
-  }
-
-  // MARK: - Audio engine + speech recognizer
-
-  private func beginRecording() throws {
-    let session = AVAudioSession.sharedInstance()
-    try session.setCategory(
-      .playAndRecord,
-      mode: .measurement,
-      options: [.defaultToSpeaker, .allowBluetooth]
-    )
-    try session.setActive(true, options: .notifyOthersOnDeactivation)
-
-    let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer()
-    guard let recognizer, recognizer.isAvailable else {
-      throw KeyboardError.recognizerUnavailable
-    }
-    self.recognizer = recognizer
-
-    let request = SFSpeechAudioBufferRecognitionRequest()
-    request.shouldReportPartialResults = true
-    if recognizer.supportsOnDeviceRecognition {
-      // Privacy + offline: keep the dictation on-device whenever the
-      // user's locale model supports it. Falls back to network on
-      // locales that don't have a downloaded model.
-      request.requiresOnDeviceRecognition = true
-    }
-    self.request = request
-
-    let engine = AVAudioEngine()
-    let inputNode = engine.inputNode
-    let format = inputNode.outputFormat(forBus: 0)
-
-    inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-      guard let self else { return }
-      // Hop to main to mutate published state. SFSpeech is fine to call
-      // off main, but `request.append` is concurrency-safe on the
-      // recognizer's own queue, so the cost is negligible.
-      Task { @MainActor in
-        self.request?.append(buffer)
-      }
-      // Cheap meter for the waveform.
-      if let data = buffer.floatChannelData?[0] {
-        let frames = Int(buffer.frameLength)
-        var sum: Float = 0
-        for i in 0..<frames { sum += abs(data[i]) }
-        let level = frames > 0 ? sum / Float(frames) : 0
-        Task { @MainActor in self.meterLevel = min(1, level * 4) }
-      }
-    }
-
-    engine.prepare()
-    try engine.start()
-    self.engine = engine
-
-    self.task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-      guard let self else { return }
-      if let result {
-        Task { @MainActor in
-          self.partialTranscript = result.bestTranscription.formattedString
-        }
-      }
-      if error != nil {
-        // Silent: SFSpeech surfaces transient errors at end-of-stream
-        // when we tear down. The captured `partialTranscript` is what
-        // we ultimately commit, so we don't need to bubble these.
-      }
-    }
-  }
-
-  private func teardownEngine() {
-    engine?.inputNode.removeTap(onBus: 0)
-    engine?.stop()
-    engine = nil
-    request?.endAudio()
-    request = nil
-    task?.cancel()
-    task = nil
-    recognizer = nil
-    meterLevel = 0
-    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-  }
-
   // MARK: - AI Enhance (Open Access required)
 
-  /// Runs the transcript through the user's configured AI provider with
-  /// a prompt that's aware of the surrounding text in the host field.
-  /// Returns nil on any failure — the caller falls back to the raw
-  /// transcript so the user's words aren't lost.
   private func enhanceWithAI(transcript: String) async -> String? {
     guard let request = AIEnhanceRequest.build(
       transcript: transcript,
       contextBefore: hostContextBefore,
       contextAfter: hostContextAfter
-    ) else { return nil }
-
+    ) else {
+      return nil
+    }
     do {
       return try await AIEnhanceClient.shared.send(request)
     } catch {
-      // Don't surface a scary error — just fall through to the raw
-      // transcript. The user still gets their dictation.
+      NSLog("[QuillKeyboard] enhance failed: %@", error as NSError)
       return nil
     }
   }
 }
 
 enum KeyboardError: LocalizedError {
-  case recognizerUnavailable
+  case bridgeOpenFailed
 
   var errorDescription: String? {
     switch self {
-    case .recognizerUnavailable:
-      "Speech recognition isn't available on this device or locale."
+    case .bridgeOpenFailed: "Couldn't open the Quill app."
     }
   }
 }

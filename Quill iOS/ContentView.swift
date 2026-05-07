@@ -357,6 +357,10 @@ struct ContentView: View {
   @State private var isBuildingPDF = false
   @State private var pendingDeleteNoteID: UUID?
   @State private var showingActionConfirmation = false
+  /// Outstanding keyboard bridge request. When non-nil, the
+  /// `KeyboardBridgeView` is presented as a full-screen cover so the
+  /// app can record on behalf of the QuillKeyboard extension.
+  @State private var keyboardBridge: (id: UUID, mode: KeyboardBridgeMode)?
   /// Transient banner state — set true when an action mode item is queued
   /// because we're offline. Auto-clears after a few seconds via the task
   /// kicked off in `.onReceive`.
@@ -502,6 +506,18 @@ struct ContentView: View {
       .sheet(isPresented: $showingActionConfirmation) {
         ActionConfirmationSheet(vm: actionVM)
       }
+      .sheet(
+        isPresented: Binding(
+          get: { keyboardBridge != nil },
+          set: { if !$0 { keyboardBridge = nil } }
+        )
+      ) {
+        if let bridge = keyboardBridge {
+          KeyboardBridgeView(requestID: bridge.id, mode: bridge.mode)
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+        }
+      }
       .onAppear {
         idlePulse = true
         // Pre-warm the Whisper model immediately on first appear so
@@ -538,6 +554,11 @@ struct ContentView: View {
           }
         case .notes:
           showingNotesList = true
+          deepLinks.consume()
+        case .keyboardBridge(let id, let mode):
+          // Keyboard extension is asking the app to record on its behalf.
+          // Present the bridge view as a full-screen cover.
+          keyboardBridge = (id: id, mode: mode)
           deepLinks.consume()
         }
       }

@@ -175,24 +175,10 @@ struct KeyboardRootView: View {
               .padding(.horizontal, 12)
           }
         }
-      case .requestingPermission:
-        statusLabel("Requesting microphone…", icon: "mic")
-      case .recording:
-        VStack(spacing: 6) {
-          MeterView(level: viewModel.meterLevel)
-            .frame(height: 22)
-            .padding(.horizontal, 24)
-          Text(viewModel.partialTranscript.isEmpty ? "Listening…" : viewModel.partialTranscript)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.white)
-            .lineLimit(3)
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 12)
-        }
+      case .awaitingApp:
+        statusLabel("Recording in Quill — return here when done.", icon: "waveform")
       case .enhancing:
         statusLabel("Enhancing…", icon: "sparkles")
-      case .parsingAction:
-        statusLabel("Creating reminder…", icon: "bolt.fill")
       case .actionDone(let title):
         actionSuccessCard(title: title)
       case .error(let msg):
@@ -246,9 +232,11 @@ struct KeyboardRootView: View {
       Image(systemName: icon)
         .font(.system(size: 12, weight: .semibold))
       Text(text)
-        .font(.system(size: 13, weight: .medium))
-        .lineLimit(2)
+        .font(.system(size: 11, weight: .medium))
+        .lineLimit(5)
+        .minimumScaleFactor(0.7)
         .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
     }
     .foregroundStyle(.white.opacity(0.9))
     .padding(.horizontal, 16)
@@ -298,10 +286,8 @@ struct KeyboardRootView: View {
   /// flips the gradient red so it's clear a tap will stop the recording
   /// and insert (or, in Action mode, parse) the result.
   private var micButton: some View {
-    let recording = viewModel.phase == .recording
+    let recording = viewModel.phase == .awaitingApp
     let busy = viewModel.phase == .enhancing
-      || viewModel.phase == .requestingPermission
-      || viewModel.phase == .parsingAction
     return Button {
       Task { await viewModel.toggleRecording() }
     } label: {
@@ -344,13 +330,13 @@ struct KeyboardRootView: View {
   }
 
   private var micGlyph: String {
-    if viewModel.phase == .recording { return "stop.fill" }
+    if viewModel.phase == .awaitingApp { return "xmark" }
     return viewModel.mode == .action ? "bolt.fill" : "mic.fill"
   }
 
   private var micLabel: String {
     switch viewModel.phase {
-    case .recording: "Stop"
+    case .awaitingApp: "Cancel"
     default:
       switch viewModel.mode {
       case .dictate: "Dictate"
@@ -361,10 +347,8 @@ struct KeyboardRootView: View {
 
   private var micAccessibilityLabel: String {
     switch viewModel.phase {
-    case .recording:
-      return viewModel.mode == .action
-        ? "Stop and create reminder"
-        : "Stop dictating and insert"
+    case .awaitingApp:
+      return "Cancel pending dictation"
     default:
       return viewModel.mode == .action
         ? "Start dictating an action"

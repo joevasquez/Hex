@@ -19,6 +19,15 @@ import Foundation
 enum QuillDeepLink: Equatable {
   case record
   case notes
+  /// Keyboard extension is requesting a recording on its behalf.
+  /// `id` round-trips through the result so the keyboard can verify
+  /// the result corresponds to its outstanding request.
+  case keyboardBridge(id: UUID, mode: KeyboardBridgeMode)
+}
+
+enum KeyboardBridgeMode: String {
+  case dictate
+  case action
 }
 
 @MainActor
@@ -41,6 +50,13 @@ final class QuillDeepLinkRouter: ObservableObject {
       pendingLink = IdentifiedLink(id: UUID(), link: .record)
     case "notes":
       pendingLink = IdentifiedLink(id: UUID(), link: .notes)
+    case "keyboard":
+      let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      let idString = items.first(where: { $0.name == "id" })?.value ?? ""
+      let modeString = items.first(where: { $0.name == "mode" })?.value ?? "dictate"
+      guard let id = UUID(uuidString: idString) else { return }
+      let mode = KeyboardBridgeMode(rawValue: modeString) ?? .dictate
+      pendingLink = IdentifiedLink(id: UUID(), link: .keyboardBridge(id: id, mode: mode))
     default:
       break
     }

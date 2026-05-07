@@ -3,24 +3,12 @@
 //  QuillKeyboard
 //
 //  Custom keyboard input view controller. Hosts a SwiftUI keyboard view
-//  that records audio, transcribes via SFSpeechRecognizer, optionally
-//  cleans up via the user's AI provider, then inserts the result into
-//  the host app's text field via `textDocumentProxy`.
+//  that delegates dictation to the parent Quill app via the App Group
+//  bridge (see `KeyboardBridge` and `KeyboardRecordingViewModel`).
 //
-//  v1 scope:
-//   - One big purple Dictate button. Hold-to-talk + tap-to-toggle both work.
-//   - Live partial transcript shown while speaking.
-//   - On stop: insert the transcript at the cursor in the host app.
-//   - "Enhance" toggle: when on, runs the transcript through the user's
-//     configured AI provider with a context-aware prompt that includes
-//     the surrounding text from the host field (via
-//     `textDocumentProxy.documentContextBeforeInput/AfterInput`).
-//   - Standard keyboard utilities: backspace, return, space, "next
-//     keyboard" globe, dismiss.
-//
-//  Memory: keyboard extensions are capped at ~48 MB on iPhone, so we
-//  deliberately do NOT bundle WhisperKit here. SFSpeech's on-device
-//  model is small and ships with iOS, which keeps us well under budget.
+//  iOS denies microphone access to non-focal extension processes, so we
+//  never record audio in-process. The keyboard is the trigger + the
+//  text-insertion surface; the parent app is the recorder.
 //
 
 import SwiftUI
@@ -34,12 +22,11 @@ final class QuillKeyboardController: UIInputViewController {
     super.viewDidLoad()
     view.backgroundColor = .clear
 
-    // The keyboard view is SwiftUI. Wire the proxy + a "switch keyboard"
-    // hook into the view-model so the SwiftUI side stays UIKit-free.
     viewModel.bind(
       proxy: textDocumentProxy,
       advanceToNextKeyboard: { [weak self] in self?.advanceToNextInputMode() },
-      dismissKeyboard: { [weak self] in self?.dismissKeyboard() }
+      dismissKeyboard: { [weak self] in self?.dismissKeyboard() },
+      openURL: { [weak self] url in self?.openContainingApp(url) }
     )
 
     let root = KeyboardRootView(viewModel: viewModel)
@@ -58,18 +45,48 @@ final class QuillKeyboardController: UIInputViewController {
     hostController = host
   }
 
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    // The user just came back from the parent Quill app — pick up any
+    // recorded transcript that was waiting in the App Group mailbox.
+    Task { @MainActor in viewModel.checkForBridgeResult() }
+  }
+
   override func viewWillDisappear(_ animated: Bool) {
     super.viewWillDisappear(animated)
-    // Stop any in-flight recording so we don't leak the audio session
-    // when the user dismisses the keyboard mid-dictation.
-    viewModel.cancelIfNeeded()
+    // Don't auto-cancel the outstanding bridge request on dismiss — the
+    // user may dismiss the keyboard while the parent app is still
+    // recording, and that's fine. The result will land on the next
+    // appearance.
   }
 
   override func textDidChange(_ textInput: UITextInput?) {
     super.textDidChange(textInput)
-    // Refresh the cached "context before / after" snapshot so the
-    // Enhance prompt always has the freshest surrounding text. This
-    // fires after every text mutation in the host app.
     viewModel.refreshHostContext()
+    // Also poll for a pending bridge result here — `viewWillAppear` is
+    // not guaranteed to fire when the user switches back to a host app
+    // that already has the keyboard up.
+    Task { @MainActor in viewModel.checkForBridgeResult() }
+  }
+
+  /// Opens a `quill://` URL in the parent app. Extensions can't call
+  /// `UIApplication.shared.open` directly; the documented escape hatch
+  /// is `extensionContext?.open(_:completionHandler:)`.
+  ///
+  /// `extensionContext.open` is only available to a subset of extension
+  /// types. Keyboard extensions historically did NOT have it, but the
+  /// modern documented workaround for keyboards is to walk the responder
+  /// chain looking for `UIApplication`.
+  private func openContainingApp(_ url: URL) {
+    var responder: UIResponder? = self
+    while let r = responder {
+      if let app = r as? UIApplication {
+        app.open(url, options: [:], completionHandler: nil)
+        return
+      }
+      responder = r.next
+    }
+    // Fallback — best effort. On modern iOS this path is rarely hit.
+    extensionContext?.open(url)
   }
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.0
+
+### New
+
+- **Cloud Sync (opt-in).** Notes and inline photos now sync across your devices via your Google account (GCP/Firestore + Cloud Storage). iOS↔Mac, with tombstone-based deletes so removing a note on one device doesn't resurrect it on the other. Mac gains a Notes viewer; iOS gains note editing. Enable in Settings → Cloud Sync.
+- **Per-app overrides (macOS).** Settings → AI gains an always-honored rules list that beats the default mode and the auto-select toggle. Add a per-app rule and the chosen mode fires every time you dictate into that app — no more relying on auto-select heuristics for the apps you use most.
+- **iOS Action confirmation parity.** The iOS confirmation sheet now matches the macOS panel — HEARD/WILL DO sections, integration chip selector at the top, dark-mode aware, and a completion badge before dismiss that deep-links to the integration's app. The sheet also opens during action parsing so you see your transcript while the LLM works.
+
+### Fixes
+
+- **Cloud Sync hardening.** GCS path encoding fix so download/delete work cross-device, debounced per-note uploads to prevent racing PATCHes, stable per-install device ID, orphaned photos cleaned up when bodies are edited, and sync triggers on scenePhase active rather than at launch.
+
 ## 0.11.0
 
 ### New

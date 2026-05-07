@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.0
+
+### Minor Changes
+
+- a9eb5b3: Cloud Sync via GCP/Firestore: cross-device notes (iOS↔Mac), photo sync via Cloud Storage, tombstone-based deletes, iOS note editing, and macOS Notes viewer. Opt-in via Settings → Cloud Sync; requires connected Google account.
+- be6c4c7: iOS confirmation sheet now opens during action parsing (transcript visible while AI works), completion badges deep-link to the integration's app, and macOS Settings → AI gains a per-app overrides list (always-honored rules that beat the default mode and the auto-select toggle).
+
+### Patch Changes
+
+- f60fec2: iOS task confirmation now matches macOS panel (HEARD/WILL DO sections + integration chip selector + dark-mode aware) and both platforms show a completion badge before dismissing.
+- 534624f: Cloud Sync hardening: fix GCS path encoding (download/delete now work cross-device), debounce per-note uploads to prevent racing PATCHes, use stable per-install device ID, clean up orphaned photos when bodies are edited, and trigger sync on scenePhase active rather than at launch.
+
 ## 0.11.0
 
 ### Minor Changes

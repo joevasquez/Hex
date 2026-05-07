@@ -73,10 +73,25 @@ class HUDPanel: NSPanel {
        let x = dict["x"] as? CGFloat,
        let y = dict["y"] as? CGFloat
     {
-      setFrameOrigin(NSPoint(x: x, y: y))
-    } else {
-      centerOnMainScreen()
+      // Validate the saved point against the *current* display layout.
+      // If the user disconnected an external display (or rearranged
+      // them in System Settings) since last launch, the saved origin
+      // can land entirely offscreen — `setFrameOrigin` will happily
+      // accept it and `orderFrontRegardless()` does nothing visible.
+      // Use `intersects` rather than `contains` so a deliberately
+      // edge-flushed pill isn't re-centered just because one pixel
+      // is technically off the screen — only fully-offscreen origins
+      // get reset.
+      let candidate = NSRect(origin: NSPoint(x: x, y: y), size: frame.size)
+      let visibleSomewhere = NSScreen.screens.contains { screen in
+        screen.frame.intersects(candidate)
+      }
+      if visibleSomewhere {
+        setFrameOrigin(candidate.origin)
+        return
+      }
     }
+    centerOnMainScreen()
   }
 
   private func centerOnMainScreen() {

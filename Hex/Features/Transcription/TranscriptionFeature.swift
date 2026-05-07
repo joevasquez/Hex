@@ -1122,6 +1122,20 @@ private extension TranscriptionFeature {
       try? FileManager.default.removeItem(at: audioURL)
     }
 
+    if hexSettings.cloudSyncEnabled {
+      let transcript = Transcript(
+        timestamp: Date(),
+        text: result,
+        audioPath: audioURL,
+        duration: duration,
+        sourceAppBundleID: sourceAppBundleID,
+        sourceAppName: sourceAppName
+      )
+      Task { @MainActor in
+        await MacCloudSync.shared.uploadTranscript(transcript)
+      }
+    }
+
     await pasteboard.paste(result, sourceAppBundleID)
     soundEffect.play(.pasteTranscript)
   }

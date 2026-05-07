@@ -1,6 +1,6 @@
 //
 //  NoteTextView.swift
-//  Quill (iOS)
+//  HexCore (cross-platform)
 //
 //  Renders a chunk of note body text with light markdown awareness:
 //  `- ` and `* ` become visual bullets with a real `•` glyph,
@@ -11,17 +11,34 @@
 //  the pieces vertically — otherwise Notes-mode output shows up as
 //  literal hyphens instead of proper bullets.
 //
+//  Lives in HexCore so iOS notes and the macOS synced-notes viewer
+//  render identically.
+//
 
 import SwiftUI
 
-struct NoteTextView: View {
-  let text: String
-  var font: Font = .body
-  var textColor: Color = .primary
-  var bulletColor: Color = .primary
-  var headingColor: Color? = nil
+public struct NoteTextView: View {
+  public let text: String
+  public var font: Font = .body
+  public var textColor: Color = .primary
+  public var bulletColor: Color = .primary
+  public var headingColor: Color? = nil
 
-  var body: some View {
+  public init(
+    text: String,
+    font: Font = .body,
+    textColor: Color = .primary,
+    bulletColor: Color = .primary,
+    headingColor: Color? = nil
+  ) {
+    self.text = text
+    self.font = font
+    self.textColor = textColor
+    self.bulletColor = bulletColor
+    self.headingColor = headingColor
+  }
+
+  public var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
         render(line: line)
@@ -40,17 +57,12 @@ struct NoteTextView: View {
     let trimmed = line.trimmingCharacters(in: .whitespaces)
 
     if trimmed.isEmpty {
-      // Preserve paragraph-break spacing without an empty `Text` (which
-      // collapses to zero height in a VStack).
       Color.clear.frame(height: 6)
     } else if let heading = matchHeading(trimmed) {
       Text(inline(heading))
         .font(font.weight(.bold))
         .foregroundStyle(headingColor ?? textColor)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // 16pt top margin separates a heading from the prior block —
-        // gives the section rhythm the deliberate beat the prose
-        // version asks for, instead of running paragraphs together.
         .padding(.top, 16)
     } else if let bullet = matchBullet(trimmed) {
       HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -78,8 +90,6 @@ struct NoteTextView: View {
     return nil
   }
 
-  /// Recognizes `**Bold heading**` / `## Heading` / `# Heading` — the
-  /// formats the Notes prompt asks the model to produce.
   private func matchHeading(_ s: String) -> String? {
     if s.hasPrefix("**"), s.hasSuffix("**"), s.count > 4 {
       return String(s.dropFirst(2).dropLast(2))

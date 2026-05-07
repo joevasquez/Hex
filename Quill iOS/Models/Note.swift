@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import HexCore
 
 struct Note: Codable, Identifiable, Equatable, Hashable {
   var id: UUID

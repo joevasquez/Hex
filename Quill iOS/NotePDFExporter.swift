@@ -9,6 +9,7 @@
 //  is three paragraphs or thirty. Print dialog can paginate if needed.
 //
 
+import HexCore
 import SwiftUI
 import UIKit
 

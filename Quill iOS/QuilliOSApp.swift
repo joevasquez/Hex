@@ -41,6 +41,10 @@ struct QuilliOSApp: App {
     // store, which leaves them invisible in the Action confirmation
     // dropdown until they re-sign-in. This one-time sync repairs them.
     Self.syncGoogleIntegrationsFromOAuth()
+
+    Task {
+      await NotesStore.shared.syncNow()
+    }
   }
 
   /// Reflect the OAuth-authorized state of Google into the integration

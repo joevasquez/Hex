@@ -50,10 +50,8 @@ struct GeneralSettingsTabView: View {
       SoundSectionView(store: store)
       GeneralSectionView(store: store)
       OfflineQueueSectionView()
+      CloudSyncSectionView(store: store)
 
-      // Welcome-tour replay — low-frequency action that doesn't
-      // deserve its own section header but fits cleanly at the
-      // bottom of the catch-all tab.
       Section {
         Button {
           store.send(.replayOnboarding)

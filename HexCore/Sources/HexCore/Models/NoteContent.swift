@@ -1,34 +1,34 @@
 //
 //  NoteContent.swift
-//  Quill (iOS)
+//  HexCore (cross-platform)
 //
-//  Tokenizer for the flat `Note.body` string. Photos are embedded inline
+//  Tokenizer for the flat note body string. Photos are embedded inline
 //  as markdown-style tokens: `![photo](<uuid>)`. This file turns a body
 //  into a segment list for rendering and provides a stripped form for
 //  share/copy/preview surfaces where the token would be meaningless.
 //
+//  Lives in HexCore so both the iOS and macOS targets can render note
+//  bodies the same way (iOS authors notes, macOS view-only renders
+//  cloud-synced ones).
+//
 
 import Foundation
 
-enum NoteSegment: Equatable {
+public enum NoteSegment: Equatable, Sendable {
   case text(String)
   case photo(UUID)
 }
 
-enum NoteContent {
+public enum NoteContent {
   private static let tokenRegex: NSRegularExpression = {
-    // Match `![photo](<UUID>)`. UUIDs are 8-4-4-4-12 hex with dashes.
     try! NSRegularExpression(pattern: #"!\[photo\]\(([0-9A-Fa-f-]{36})\)"#)
   }()
 
-  static func photoToken(for photoID: UUID) -> String {
+  public static func photoToken(for photoID: UUID) -> String {
     "![photo](\(photoID.uuidString))"
   }
 
-  /// Parse the body into ordered text/photo segments. Whitespace-only
-  /// text runs between tokens are dropped so consecutive photos render
-  /// flush without visible empty paragraphs.
-  static func segments(from body: String) -> [NoteSegment] {
+  public static func segments(from body: String) -> [NoteSegment] {
     let ns = body as NSString
     let range = NSRange(location: 0, length: ns.length)
     let matches = tokenRegex.matches(in: body, range: range)
@@ -59,23 +59,17 @@ enum NoteContent {
     return segments
   }
 
-  /// Body with photo tokens removed — for share, copy, preview text, and
-  /// word counts. Collapses the blank-line fences that surrounded the
-  /// removed tokens so the result reads as clean prose.
-  static func stripPhotos(from body: String) -> String {
+  public static func stripPhotos(from body: String) -> String {
     let ns = body as NSString
     let range = NSRange(location: 0, length: ns.length)
     var stripped = tokenRegex.stringByReplacingMatches(in: body, range: range, withTemplate: "")
-    // Collapse runs of 3+ newlines (left behind when tokens had `\n\n`
-    // separators on both sides) into standard paragraph breaks.
     while stripped.contains("\n\n\n") {
       stripped = stripped.replacingOccurrences(of: "\n\n\n", with: "\n\n")
     }
     return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
-  /// All photo UUIDs referenced by the body, in order.
-  static func photoIDs(in body: String) -> [UUID] {
+  public static func photoIDs(in body: String) -> [UUID] {
     segments(from: body).compactMap { seg in
       if case .photo(let id) = seg { return id }
       return nil

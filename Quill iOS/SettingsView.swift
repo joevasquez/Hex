@@ -18,6 +18,7 @@ struct SettingsView: View {
   @AppStorage(CustomAIModesStorage.userDefaultsKey) private var customModesData: Data = Data()
   @AppStorage(IntegrationConnectionStore.userDefaultsKey) private var integrationData: Data = Data()
   @AppStorage(ErrorMonitoringSettings.crashReportingEnabledKey) private var crashReportingEnabled: Bool = false
+  @AppStorage(CloudSyncConstants.cloudSyncEnabledKey) private var cloudSyncEnabled: Bool = false
   /// JSON-encoded set of built-in AI modes the user has hidden from
   /// the home-screen pill bar. Defaults to empty (everything visible).
   @AppStorage(QuillIOSSettingsKey.disabledBuiltInModes) private var disabledBuiltInModesData: Data = Data()
@@ -201,6 +202,21 @@ struct SettingsView: View {
           Text("Accounts")
         } footer: {
           Text("Sign in once to enable Gmail and Google Calendar in Action mode. Optional — you can do this later or skip it entirely.")
+        }
+
+        if IOSGoogleOAuthClient.isAuthorized() {
+          Section {
+            Toggle(isOn: $cloudSyncEnabled) {
+              Label("Sync to Cloud", systemImage: "icloud.and.arrow.up")
+            }
+            if cloudSyncEnabled {
+              CloudSyncStatusRow()
+            }
+          } header: {
+            Text("Cloud Sync")
+          } footer: {
+            Text("When on, your notes sync to Google Cloud so you can access them from your Mac and other devices. Requires a Google account.")
+          }
         }
 
         Section {

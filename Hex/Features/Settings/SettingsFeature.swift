@@ -152,6 +152,11 @@ struct SettingsFeature {
     /// again on the next launch / window open. Triggered by the
     /// "Replay Tutorial" entry in Settings → General.
     case replayOnboarding
+
+    // Cloud Sync
+    case setCloudSyncEnabled(Bool)
+    case syncNow
+    case syncCompleted(notesDown: Int, transcriptsUp: Int)
   }
 
   @Dependency(\.keyEventMonitor) var keyEventMonitor
@@ -760,6 +765,21 @@ struct SettingsFeature {
 
       case .replayOnboarding:
         state.$hexSettings.withLock { $0.hasCompletedOnboarding = false }
+        return .none
+
+      case let .setCloudSyncEnabled(enabled):
+        state.$hexSettings.withLock { $0.cloudSyncEnabled = enabled }
+        return .none
+
+      case .syncNow:
+        let history = state.transcriptionHistory.history
+        return .run { send in
+          await MacCloudSync.shared.syncTranscripts(history)
+          let count = await MacCloudSync.shared.lastSyncNotesCount
+          await send(.syncCompleted(notesDown: count, transcriptsUp: history.count))
+        }
+
+      case .syncCompleted:
         return .none
 
       }

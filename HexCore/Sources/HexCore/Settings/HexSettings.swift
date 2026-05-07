@@ -74,6 +74,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	/// first-launch onboarding walk-through. Resetting it to `false`
 	/// from Settings → General → "Replay Tutorial" re-enters the flow.
 	public var hasCompletedOnboarding: Bool
+	public var cloudSyncEnabled: Bool
 
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
@@ -122,7 +123,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		liveTranscriptEnabled: Bool = false,
 		customAIModes: [CustomAIMode] = [],
 		inlineEditEnabled: Bool = true,
-		hasCompletedOnboarding: Bool = false
+		hasCompletedOnboarding: Bool = false,
+		cloudSyncEnabled: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -160,6 +162,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.customAIModes = customAIModes
 		self.inlineEditEnabled = inlineEditEnabled
 		self.hasCompletedOnboarding = hasCompletedOnboarding
+		self.cloudSyncEnabled = cloudSyncEnabled
 		normalizeDoubleTapSettings()
 	}
 
@@ -220,6 +223,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case customAIModes
 	case inlineEditEnabled
 	case hasCompletedOnboarding
+	case cloudSyncEnabled
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -372,6 +376,7 @@ private enum HexSettingsSchema {
 		SettingsField(.customAIModes, keyPath: \.customAIModes, default: defaults.customAIModes).eraseToAny(),
 		SettingsField(.inlineEditEnabled, keyPath: \.inlineEditEnabled, default: defaults.inlineEditEnabled).eraseToAny(),
 		SettingsField(.hasCompletedOnboarding, keyPath: \.hasCompletedOnboarding, default: defaults.hasCompletedOnboarding).eraseToAny(),
+		SettingsField(.cloudSyncEnabled, keyPath: \.cloudSyncEnabled, default: defaults.cloudSyncEnabled).eraseToAny(),
 	]
 }
 

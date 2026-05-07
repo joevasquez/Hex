@@ -8,6 +8,7 @@
 //  divider, metadata footer).
 //
 
+import HexCore
 import SwiftUI
 
 struct NotesListView: View {

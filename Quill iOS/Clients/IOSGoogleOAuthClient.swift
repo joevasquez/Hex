@@ -46,10 +46,13 @@ enum IOSGoogleOAuthClient {
 
   /// Same scope list as macOS — `userinfo.email` powers the
   /// "Connected as <email>" UI in Settings + Onboarding.
+  /// `datastore` enables Firestore cloud sync when the user opts in.
   static let defaultScopes: [String] = [
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/userinfo.email",
+    CloudSyncConstants.firestoreScope,
+    CloudSyncConstants.photoStorageScope,
   ]
 
   static let googleAccountEmailDefaultsKey = "quill.googleAccountEmail"

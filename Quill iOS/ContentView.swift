@@ -356,6 +356,7 @@ struct ContentView: View {
   @State private var shareRequest: ShareRequest?
   @State private var isBuildingPDF = false
   @State private var pendingDeleteNoteID: UUID?
+  @State private var editingNoteID: UUID?
   @State private var showingActionConfirmation = false
   /// Transient banner state — set true when an action mode item is queued
   /// because we're offline. Auto-clears after a few seconds via the task
@@ -501,6 +502,14 @@ struct ContentView: View {
       }
       .sheet(isPresented: $showingActionConfirmation) {
         ActionConfirmationSheet(vm: actionVM)
+      }
+      .sheet(isPresented: Binding(
+        get: { editingNoteID != nil },
+        set: { if !$0 { editingNoteID = nil } }
+      )) {
+        if let id = editingNoteID, let note = notes.notes.first(where: { $0.id == id }) {
+          NoteEditSheet(note: note)
+        }
       }
       .onAppear {
         idlePulse = true
@@ -953,6 +962,7 @@ struct ContentView: View {
           .foregroundStyle(.tertiary)
           .padding(.trailing, 2)
 
+        noteEditButton(for: note, tint: tint)
         noteShareMenu(for: note, tint: tint)
         noteCopyButton(for: note, tint: tint)
         noteDeleteButton(for: note)
@@ -1178,6 +1188,17 @@ struct ContentView: View {
     }
     .buttonStyle(.plain)
     .accessibilityLabel("Delete note")
+  }
+
+  private func noteEditButton(for note: Note, tint: Color) -> some View {
+    Button {
+      UISelectionFeedbackGenerator().selectionChanged()
+      editingNoteID = note.id
+    } label: {
+      noteToolbarGlyph(systemName: "pencil", tint: tint)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel("Edit note")
   }
 
   private func noteCopyButton(for note: Note, tint: Color) -> some View {

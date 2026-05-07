@@ -51,6 +51,8 @@ struct AppFeature {
     case remappings
     /// Transcription history viewer.
     case history
+    /// Cloud-synced notes (originating on iOS) viewer.
+    case notes
     /// About / version / Sparkle update info.
     case about
   }
@@ -398,18 +400,20 @@ struct AppFeature {
 /// when History is selected the sidebar collapses so the transcript
 /// list and detail get the full window width.
 private enum SidebarMode: String, CaseIterable, Identifiable {
-  case settings, history
+  case settings, history, notes
   var id: String { rawValue }
   var title: String {
     switch self {
     case .settings: "Settings"
     case .history: "History"
+    case .notes: "Notes"
     }
   }
   var icon: String {
     switch self {
     case .settings: "gearshape.fill"
     case .history:  "clock.fill"
+    case .notes:    "note.text"
     }
   }
 }
@@ -479,6 +483,7 @@ struct AppView: View {
   private var sidebarMode: SidebarMode {
     switch store.state.activeTab {
     case .history: .history
+    case .notes: .notes
     default: .settings
     }
   }
@@ -496,11 +501,13 @@ struct AppView: View {
           onSelect: { newMode in
             switch newMode {
             case .settings:
-              if store.state.activeTab == .history {
+              if store.state.activeTab == .history || store.state.activeTab == .notes {
                 store.send(.setActiveTab(.general))
               }
             case .history:
               store.send(.setActiveTab(.history))
+            case .notes:
+              store.send(.setActiveTab(.notes))
             }
           }
         )
@@ -523,11 +530,11 @@ struct AppView: View {
           .listStyle(.sidebar)
         } else {
           // Subtle hint that the sidebar is intentionally empty
-          // while History owns the right pane.
+          // while the right pane owns the full width.
           Spacer()
           HStack {
             Spacer()
-            Text("Showing all transcripts")
+            Text(sidebarMode == .notes ? "Showing synced notes" : "Showing all transcripts")
               .font(.caption)
               .foregroundStyle(.secondary)
             Spacer()
@@ -564,6 +571,9 @@ struct AppView: View {
       case .history:
         HistoryView(store: store.scope(state: \.history, action: \.history))
           .navigationTitle("History")
+      case .notes:
+        NotesView()
+          .navigationTitle("Notes")
       case .about:
         AboutView(store: store.scope(state: \.settings, action: \.settings))
           .navigationTitle("About")

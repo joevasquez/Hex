@@ -59,11 +59,14 @@ extension GoogleOAuthClient: DependencyKey {
 
   /// Scopes requested for every Google sign-in. `userinfo.email` lets us
   /// display "Connected as <address>" in Settings; the others power Gmail
-  /// drafts and Calendar event creation in Action mode.
+  /// drafts and Calendar event creation in Action mode. `datastore` enables
+  /// Firestore cloud sync when the user opts in.
   static let defaultScopes: [String] = [
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/userinfo.email",
+    CloudSyncConstants.firestoreScope,
+    CloudSyncConstants.photoStorageScope,
   ]
 
   /// UserDefaults key for the cached account email — shared across Settings

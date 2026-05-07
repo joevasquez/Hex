@@ -203,7 +203,13 @@ struct HistoryFeature {
 					history.history.remove(at: index)
 				}
 
-				return deleteAudioEffect(for: [transcript])
+				let deletedID = transcript.id
+				return .merge(
+					deleteAudioEffect(for: [transcript]),
+					.run { _ in
+						await MacCloudSync.shared.deleteTranscriptFromCloud(id: deletedID)
+					}
+				)
 
 			case .deleteAllTranscripts:
 				return .send(.confirmDeleteAll)
@@ -216,7 +222,15 @@ struct HistoryFeature {
 					history.history.removeAll()
 				}
 
-				return deleteAudioEffect(for: transcripts)
+				let deletedIDs = transcripts.map(\.id)
+				return .merge(
+					deleteAudioEffect(for: transcripts),
+					.run { _ in
+						for id in deletedIDs {
+							await MacCloudSync.shared.deleteTranscriptFromCloud(id: id)
+						}
+					}
+				)
 				
 			case .navigateToSettings:
 				// This will be handled by the parent reducer

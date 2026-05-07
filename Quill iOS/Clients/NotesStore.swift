@@ -88,15 +88,9 @@ final class NotesStore: ObservableObject {
       }
       note.updatedAt = now
       notes[idx] = note
-      save()
+      save(syncNoteID: note.id)
       return note
     } else {
-      // No active note — create one seeded with this text. Leave
-      // `title` empty so `displayTitle` falls back to the derived
-      // title until `generateTitleIfNeeded` replaces it with an
-      // AI-generated one. `isAutoTitle` defaults to true, which
-      // unlocks both the derived-fallback display and the async
-      // AI-title path.
       var note = Note(
         title: "",
         body: trimmed,
@@ -104,12 +98,11 @@ final class NotesStore: ObservableObject {
         updatedAt: now,
         location: locationIfCreating
       )
-      // If derivedTitle ran on the trimmed body, there's nothing more to do.
-      _ = note  // silence shadow
+      _ = note
       note.updatedAt = now
       notes.append(note)
       setActiveNote(id: note.id)
-      save()
+      save(syncNoteID: note.id)
       return note
     }
   }
@@ -126,7 +119,7 @@ final class NotesStore: ObservableObject {
     )
     notes.append(note)
     setActiveNote(id: note.id)
-    save()
+    save(syncNoteID: note.id)
     return note
   }
 
@@ -142,29 +135,36 @@ final class NotesStore: ObservableObject {
   func renameNote(id: UUID, to title: String) {
     guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
     notes[idx].title = title
-    // User is intentionally setting the name — lock it in so future
-    // AI title generation doesn't stomp it.
     notes[idx].isAutoTitle = false
     notes[idx].updatedAt = Date()
-    save()
+    save(syncNoteID: id)
   }
 
   func updateBody(id: UUID, to body: String) {
     guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
     notes[idx].body = body
     notes[idx].updatedAt = Date()
-    save()
+    save(syncNoteID: id)
   }
 
   func deleteNote(id: UUID) {
+    let photoIDs: [UUID]
+    if let note = notes.first(where: { $0.id == id }) {
+      photoIDs = NoteContent.photoIDs(in: note.body)
+    } else {
+      photoIDs = []
+    }
+
     notes.removeAll { $0.id == id }
     PhotoStore.shared.deleteAllPhotos(noteID: id)
     if activeNoteID == id {
-      // If we deleted the active one, fall back to the most-recent remaining
-      // note, or clear active if the list is empty.
       setActiveNote(id: sortedNotes.first?.id)
     }
     save()
+    deleteNoteFromCloud(id)
+    for photoID in photoIDs {
+      deletePhotoFromCloud(noteID: id, photoID: photoID)
+    }
   }
 
   /// Save `image` to disk, make sure there's an active note to attach it
@@ -195,7 +195,8 @@ final class NotesStore: ObservableObject {
       }
       note.updatedAt = Date()
       notes[idx] = note
-      save()
+      save(syncNoteID: targetID)
+      uploadPhotoToCloud(noteID: targetID, photoID: photoID)
       return (targetID, photoID)
     } catch {
       print("NotesStore: failed to save photo: \(error)")
@@ -242,7 +243,7 @@ final class NotesStore: ObservableObject {
         notes[idx].title = title
         notes[idx].isAutoTitle = false
         notes[idx].updatedAt = Date()
-        save()
+        save(syncNoteID: noteID)
       } catch {
         // Best-effort: log and leave the title as the derived
         // fallback. Don't surface to the user — a missing API key
@@ -299,6 +300,248 @@ final class NotesStore: ObservableObject {
     }
   }
 
+  // MARK: - Cloud Sync
+
+  /// Cloud-synced notes from other devices (macOS transcripts, etc.)
+  @Published private(set) var cloudNotes: [SyncableNote] = []
+
+  enum SyncStatus: Equatable {
+    case idle
+    case syncing
+    case completed(notesUp: Int, notesDown: Int, at: Date)
+    case failed(String)
+  }
+
+  @Published private(set) var syncStatus: SyncStatus = .idle
+
+  func syncNow() async {
+    guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
+          IOSGoogleOAuthClient.isAuthorized()
+    else {
+      syncStatus = .failed("Cloud sync is off or Google not connected.")
+      return
+    }
+
+    syncStatus = .syncing
+
+    do {
+      let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
+      guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else {
+        syncStatus = .failed("No Google email cached.")
+        return
+      }
+
+      let tombstones = await CloudSyncManager.shared.fetchTombstones(accessToken: accessToken, userEmail: email)
+      let tombstonedIDs = Set(tombstones.map(\.id))
+
+      for tomb in tombstones {
+        if let idx = notes.firstIndex(where: { $0.id == tomb.id }) {
+          if notes[idx].updatedAt <= tomb.deletedAt {
+            notes.remove(at: idx)
+            PhotoStore.shared.deleteAllPhotos(noteID: tomb.id)
+          }
+        }
+      }
+
+      let localSyncables = notes
+        .filter { !tombstonedIDs.contains($0.id) }
+        .map { noteToSyncable($0) }
+
+      let result = await CloudSyncManager.shared.fullSync(
+        localNotes: localSyncables,
+        localTranscripts: [],
+        accessToken: accessToken,
+        userEmail: email
+      )
+
+      var notesDown = 0
+      for cloudNote in result.notesFromCloud where !tombstonedIDs.contains(cloudNote.id) {
+        mergeCloudNote(cloudNote)
+        notesDown += 1
+      }
+
+      let manifests = await CloudSyncManager.shared.fetchPhotoManifests(accessToken: accessToken, userEmail: email)
+      await downloadMissingPhotos(manifests: manifests, tombstonedNoteIds: tombstonedIDs, accessToken: accessToken)
+
+      let remoteTranscripts = await CloudSyncManager.shared.fetchTranscripts(
+        accessToken: accessToken,
+        userEmail: email
+      )
+      self.cloudNotes = remoteTranscripts.map { t in
+        SyncableNote(
+          id: t.id,
+          title: t.sourceAppName ?? "Transcription",
+          body: t.text,
+          createdAt: t.timestamp,
+          updatedAt: t.timestamp,
+          sourceDevice: t.sourceDevice,
+          sourcePlatform: t.sourcePlatform
+        )
+      }
+
+      syncStatus = .completed(notesUp: result.notesUploaded, notesDown: notesDown, at: Date())
+
+    } catch {
+      syncStatus = .failed(error.localizedDescription)
+      print("NotesStore: cloud sync failed: \(error.localizedDescription)")
+    }
+  }
+
+  private func syncNoteToCloud(_ note: Note) {
+    guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
+          IOSGoogleOAuthClient.isAuthorized()
+    else { return }
+
+    Task {
+      do {
+        let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
+        guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else { return }
+        let syncable = noteToSyncable(note)
+        await CloudSyncManager.shared.uploadNote(syncable, accessToken: accessToken, userEmail: email)
+      } catch {
+        print("NotesStore: background sync failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  private func deleteNoteFromCloud(_ id: UUID) {
+    guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
+          IOSGoogleOAuthClient.isAuthorized()
+    else { return }
+
+    let device = UIDevice.current.name
+    Task {
+      do {
+        let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
+        guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else { return }
+        await CloudSyncManager.shared.writeTombstone(id: id, sourceDevice: device, accessToken: accessToken, userEmail: email)
+        await CloudSyncManager.shared.deleteNote(id: id, accessToken: accessToken, userEmail: email)
+      } catch {
+        print("NotesStore: cloud delete failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  /// Upload a photo's JPEG bytes to GCS + write its manifest to Firestore.
+  /// Best-effort: if cloud sync is off, no Google account, or the network
+  /// is down, we silently no-op (the photo still lives locally). When the
+  /// user re-enables sync or comes back online, the next `syncNow` won't
+  /// re-upload existing photos because the manifest tells us what's
+  /// already up — but our current sync pass doesn't push photos for
+  /// already-saved notes. For V1 this is fine: photos sync at insert
+  /// time. A "Sync all photos" backfill is a follow-up.
+  func uploadPhotoToCloud(noteID: UUID, photoID: UUID) {
+    guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
+          IOSGoogleOAuthClient.isAuthorized()
+    else { return }
+    guard let data = PhotoStore.shared.imageData(noteID: noteID, photoID: photoID) else {
+      print("NotesStore: photo \(photoID) missing on disk, skipping upload")
+      return
+    }
+    let device = UIDevice.current.name
+    Task {
+      do {
+        let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
+        guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else { return }
+        await CloudSyncManager.shared.uploadPhoto(
+          noteId: noteID,
+          photoId: photoID,
+          data: data,
+          sourceDevice: device,
+          accessToken: accessToken,
+          userEmail: email
+        )
+      } catch {
+        print("NotesStore: photo upload failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  private func deletePhotoFromCloud(noteID: UUID, photoID: UUID) {
+    guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
+          IOSGoogleOAuthClient.isAuthorized()
+    else { return }
+    Task {
+      do {
+        let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
+        guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else { return }
+        await CloudSyncManager.shared.deletePhoto(noteId: noteID, photoId: photoID, accessToken: accessToken, userEmail: email)
+      } catch {
+        print("NotesStore: photo delete failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  /// Download any photos referenced by local notes that aren't already
+  /// on disk. Called during `syncNow` after notes have merged so the
+  /// local body's photo tokens have a JPEG to render. Skips photos
+  /// whose manifest matches a tombstoned note.
+  private func downloadMissingPhotos(manifests: [PhotoManifest], tombstonedNoteIds: Set<UUID>, accessToken: String) async {
+    let localNoteIds = Set(notes.map(\.id))
+    for manifest in manifests {
+      guard localNoteIds.contains(manifest.noteId),
+            !tombstonedNoteIds.contains(manifest.noteId)
+      else { continue }
+      let localURL = PhotoStore.shared.url(noteID: manifest.noteId, photoID: manifest.photoId)
+      if FileManager.default.fileExists(atPath: localURL.path) { continue }
+
+      guard let data = await CloudSyncManager.shared.downloadPhoto(manifest: manifest, accessToken: accessToken) else { continue }
+      let dir = localURL.deletingLastPathComponent()
+      try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      do {
+        try data.write(to: localURL, options: [.atomic])
+      } catch {
+        print("NotesStore: failed to write downloaded photo: \(error)")
+      }
+    }
+  }
+
+  private func noteToSyncable(_ note: Note) -> SyncableNote {
+    SyncableNote(
+      id: note.id,
+      title: note.title,
+      body: note.body,
+      createdAt: note.createdAt,
+      updatedAt: note.updatedAt,
+      latitude: note.location?.latitude,
+      longitude: note.location?.longitude,
+      placeName: note.location?.placeName,
+      isAutoTitle: note.isAutoTitle,
+      sourceDevice: UIDevice.current.name,
+      sourcePlatform: .iOS
+    )
+  }
+
+  private func mergeCloudNote(_ cloud: SyncableNote) {
+    if let idx = notes.firstIndex(where: { $0.id == cloud.id }) {
+      if cloud.updatedAt > notes[idx].updatedAt {
+        notes[idx].title = cloud.title
+        notes[idx].body = cloud.body
+        notes[idx].updatedAt = cloud.updatedAt
+        notes[idx].isAutoTitle = cloud.isAutoTitle
+        if let lat = cloud.latitude, let lng = cloud.longitude {
+          notes[idx].location = NoteLocation(latitude: lat, longitude: lng, placeName: cloud.placeName)
+        }
+      }
+    } else if cloud.sourcePlatform == .iOS {
+      let note = Note(
+        id: cloud.id,
+        title: cloud.title,
+        body: cloud.body,
+        createdAt: cloud.createdAt,
+        updatedAt: cloud.updatedAt,
+        location: cloud.latitude.flatMap { lat in
+          cloud.longitude.map { lng in
+            NoteLocation(latitude: lat, longitude: lng, placeName: cloud.placeName)
+          }
+        },
+        isAutoTitle: cloud.isAutoTitle
+      )
+      notes.append(note)
+    }
+    save()
+  }
+
   // MARK: - Persistence
 
   private func activeNoteIndex() -> Int? {
@@ -317,19 +560,18 @@ final class NotesStore: ObservableObject {
     }
   }
 
-  private func save() {
+  private func save(syncNoteID: UUID? = nil) {
     do {
       let data = try JSONEncoder.notes.encode(notes)
       try data.write(to: fileURL, options: [.atomic])
     } catch {
       print("NotesStore: failed to persist notes.json: \(error)")
     }
-    // Update the home-screen widget's snapshot every time notes
-    // change. The widget reads this blob from the App Group shared
-    // UserDefaults; `WidgetCenter.reloadAllTimelines` tells
-    // WidgetKit to re-render the visible widget. Both calls are
-    // cheap and safe to fire from every mutation.
     updateWidgetSnapshot()
+
+    if let id = syncNoteID, let note = notes.first(where: { $0.id == id }) {
+      syncNoteToCloud(note)
+    }
   }
 
   /// Pick the most-recently-updated note and publish a compact

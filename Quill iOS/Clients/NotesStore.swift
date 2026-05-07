@@ -21,6 +21,23 @@ import UIKit
 import WidgetKit
 #endif
 
+/// Stable per-install device identifier for cloud-sync `sourceDevice`.
+/// `UIDevice.current.name` returns "iPhone" generically on iOS 16+ unless
+/// the app holds a special entitlement, which Quill doesn't — so it's
+/// useless for telling devices apart. Vendor-scoped UUID + a model hint
+/// is both stable across launches and human-readable in the cloud.
+private enum DeviceIdentity {
+  static let id: String = {
+    let key = "quill.deviceID"
+    if let existing = UserDefaults.standard.string(forKey: key) { return existing }
+    let suffix = UIDevice.current.identifierForVendor?.uuidString.prefix(8) ?? UUID().uuidString.prefix(8)
+    let model = UIDevice.current.model // "iPhone" / "iPad"
+    let new = "\(model)-\(suffix)"
+    UserDefaults.standard.set(new, forKey: key)
+    return new
+  }()
+}
+
 @MainActor
 final class NotesStore: ObservableObject {
   static let shared = NotesStore()
@@ -314,6 +331,14 @@ final class NotesStore: ObservableObject {
 
   @Published private(set) var syncStatus: SyncStatus = .idle
 
+  /// Per-note upload tasks. We coalesce rapid successive saves (typing
+  /// in NoteEditSheet, AI title landing right after a record append) by
+  /// cancelling any pending upload for the same note ID before scheduling
+  /// the new one. Without this, multiple PATCHes for the same doc race —
+  /// Firestore takes whichever lands last, not whichever was issued last,
+  /// so a stale earlier version can clobber a fresh later one.
+  private var pendingUploads: [UUID: Task<Void, Never>] = [:]
+
   func syncNow() async {
     guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
           IOSGoogleOAuthClient.isAuthorized()
@@ -392,15 +417,36 @@ final class NotesStore: ObservableObject {
           IOSGoogleOAuthClient.isAuthorized()
     else { return }
 
-    Task {
+    let id = note.id
+    pendingUploads[id]?.cancel()
+    pendingUploads[id] = Task { [weak self] in
+      // 500ms debounce — coalesces typing bursts and back-to-back
+      // mutations (e.g. body append + AI title landing within the
+      // same second). The latest pending state is read inside the
+      // task so we always upload the freshest snapshot.
+      try? await Task.sleep(for: .milliseconds(500))
+      guard !Task.isCancelled, let self else { return }
+
+      // Re-read the latest version of the note from the store rather
+      // than uploading the stale snapshot captured at scheduling time —
+      // by the time the debounce elapses there may be even newer edits.
+      guard let latest = self.notes.first(where: { $0.id == id }) else {
+        self.pendingUploads[id] = nil
+        return
+      }
+
       do {
         let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
-        guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else { return }
-        let syncable = noteToSyncable(note)
+        guard let email = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) else {
+          self.pendingUploads[id] = nil
+          return
+        }
+        let syncable = self.noteToSyncable(latest)
         await CloudSyncManager.shared.uploadNote(syncable, accessToken: accessToken, userEmail: email)
       } catch {
         print("NotesStore: background sync failed: \(error.localizedDescription)")
       }
+      self.pendingUploads[id] = nil
     }
   }
 
@@ -409,7 +455,7 @@ final class NotesStore: ObservableObject {
           IOSGoogleOAuthClient.isAuthorized()
     else { return }
 
-    let device = UIDevice.current.name
+    let device = DeviceIdentity.id
     Task {
       do {
         let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
@@ -438,7 +484,7 @@ final class NotesStore: ObservableObject {
       print("NotesStore: photo \(photoID) missing on disk, skipping upload")
       return
     }
-    let device = UIDevice.current.name
+    let device = DeviceIdentity.id
     Task {
       do {
         let accessToken = try await IOSGoogleOAuthClient.refreshIfNeeded()
@@ -457,7 +503,7 @@ final class NotesStore: ObservableObject {
     }
   }
 
-  private func deletePhotoFromCloud(noteID: UUID, photoID: UUID) {
+  func deletePhotoFromCloud(noteID: UUID, photoID: UUID) {
     guard UserDefaults.standard.bool(forKey: CloudSyncConstants.cloudSyncEnabledKey),
           IOSGoogleOAuthClient.isAuthorized()
     else { return }
@@ -507,7 +553,7 @@ final class NotesStore: ObservableObject {
       longitude: note.location?.longitude,
       placeName: note.location?.placeName,
       isAutoTitle: note.isAutoTitle,
-      sourceDevice: UIDevice.current.name,
+      sourceDevice: DeviceIdentity.id,
       sourcePlatform: .iOS
     )
   }

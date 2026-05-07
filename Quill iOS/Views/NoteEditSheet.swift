@@ -88,7 +88,23 @@ struct NoteEditSheet: View {
       notesStore.renameNote(id: note.id, to: trimmedTitle)
     }
     if draftBody != note.body {
+      // Clean up any photo tokens the user removed during the edit so
+      // we don't leak orphaned JPEGs locally OR in the cloud. Compare
+      // the BEFORE token set to the AFTER token set; anything that
+      // disappeared gets purged from PhotoStore + GCS + the manifest.
+      let before = Set(NoteContent.photoIDs(in: note.body))
+      let after = Set(NoteContent.photoIDs(in: draftBody))
+      let removed = before.subtracting(after)
+
       notesStore.updateBody(id: note.id, to: draftBody)
+
+      for photoID in removed {
+        let url = PhotoStore.shared.url(noteID: note.id, photoID: photoID)
+        try? FileManager.default.removeItem(at: url)
+        let analysisURL = PhotoStore.shared.analysisURL(noteID: note.id, photoID: photoID)
+        try? FileManager.default.removeItem(at: analysisURL)
+        notesStore.deletePhotoFromCloud(noteID: note.id, photoID: photoID)
+      }
     }
   }
 }

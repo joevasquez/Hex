@@ -41,10 +41,10 @@ struct QuilliOSApp: App {
     // store, which leaves them invisible in the Action confirmation
     // dropdown until they re-sign-in. This one-time sync repairs them.
     Self.syncGoogleIntegrationsFromOAuth()
-
-    Task {
-      await NotesStore.shared.syncNow()
-    }
+    // Cloud sync intentionally NOT triggered here — it's wired to
+    // `scenePhase == .active` below so it (a) doesn't compete with
+    // launch-time work like model warm-up + TCC prompts, and (b)
+    // automatically refreshes when the user foregrounds the app.
   }
 
   /// Reflect the OAuth-authorized state of Google into the integration
@@ -75,6 +75,8 @@ struct QuilliOSApp: App {
     }
   }
 
+  @Environment(\.scenePhase) private var scenePhase
+
   var body: some Scene {
     WindowGroup {
       ContentView()
@@ -93,6 +95,16 @@ struct QuilliOSApp: App {
         )) {
           OnboardingView(hasCompletedOnboarding: $hasCompletedOnboarding)
         }
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      // Cloud sync runs on every foregrounding rather than just first
+      // launch — keeps the local copy fresh after a long backgrounded
+      // gap and gives the system breathing room at launch (model
+      // warm-up, TCC prompts) since `init()` no longer fires sync.
+      // No-op when sync is disabled or Google isn't connected.
+      if newPhase == .active {
+        Task { await NotesStore.shared.syncNow() }
+      }
     }
   }
 }

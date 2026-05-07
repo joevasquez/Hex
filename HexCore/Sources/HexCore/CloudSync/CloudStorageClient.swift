@@ -10,6 +10,17 @@ private let storageLogger = Logger(subsystem: "com.joevasquez.Quill", category: 
 public actor CloudStorageClient {
   private let bucket: String
 
+  /// CharacterSet for percent-encoding GCS object names that go in the
+  /// URL *path* (e.g. `/o/{name}`). Slashes MUST be encoded as `%2F` —
+  /// `.urlPathAllowed` includes `/` so we strip it explicitly. Without
+  /// this, `users/foo/photos/bar.jpg` is sent as raw slashes and GCS
+  /// interprets the segments as nested API paths, returning 404.
+  private static let objectNameAllowed: CharacterSet = {
+    var set = CharacterSet.urlPathAllowed
+    set.remove(charactersIn: "/")
+    return set
+  }()
+
   public init(bucket: String = CloudSyncConstants.gcsBucket) {
     self.bucket = bucket
   }
@@ -58,7 +69,7 @@ public actor CloudStorageClient {
     objectPath: String,
     accessToken: String
   ) async throws -> Data? {
-    let encodedPath = objectPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? objectPath
+    let encodedPath = objectPath.addingPercentEncoding(withAllowedCharacters: Self.objectNameAllowed) ?? objectPath
     let url = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encodedPath)?alt=media")!
 
     var request = URLRequest(url: url)
@@ -86,7 +97,7 @@ public actor CloudStorageClient {
     objectPath: String,
     accessToken: String
   ) async throws {
-    let encodedPath = objectPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? objectPath
+    let encodedPath = objectPath.addingPercentEncoding(withAllowedCharacters: Self.objectNameAllowed) ?? objectPath
     let url = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encodedPath)")!
 
     var request = URLRequest(url: url)

@@ -95,9 +95,18 @@ class HUDPanel: NSPanel {
   }
 
   private func centerOnMainScreen() {
-    guard let screen = NSScreen.main else { return }
-    let x = screen.frame.midX - frame.width / 2
-    let y = screen.frame.maxY - 80
+    // Prefer `NSScreen.main` when available, but fall back to the first
+    // screen — `NSScreen.main` is the screen with key focus and can be
+    // nil during early launch when the app hasn't activated.
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+    // Use `visibleFrame` (excludes menu bar + dock) so we don't tuck the
+    // pill behind the menu bar. `setFrameOrigin` positions the panel's
+    // BOTTOM-LEFT corner — we want the panel TOP near the top of the
+    // visible area, so subtract the panel height to land the top edge
+    // 16 pt below the menu bar.
+    let visible = screen.visibleFrame
+    let x = visible.midX - frame.width / 2
+    let y = visible.maxY - frame.height - 16
     setFrameOrigin(NSPoint(x: x, y: y))
   }
 

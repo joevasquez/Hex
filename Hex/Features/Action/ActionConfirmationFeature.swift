@@ -36,6 +36,27 @@ struct ActionConfirmationFeature {
     var editableBody: String = ""
     var isExecuting: Bool = false
     var error: String?
+    /// Set after the action is created or queued so the panel can flip
+    /// to the success badge before it dismisses. Mirrors the iOS sheet
+    /// so users get the same "this actually worked" confirmation on
+    /// both platforms.
+    var completion: Completion?
+
+    /// Result that drives the success badge view. Carries the
+    /// integration + final title so the badge can render
+    /// "Added to <Integration>" without re-deriving from the intent.
+    /// `externalID` is the adapter-returned identifier (EventKit's
+    /// `calendarItemIdentifier`, Todoist task id, etc.) — currently
+    /// unused for the deep-link pill (we open the app root) but kept
+    /// here so per-item links can land later without another state
+    /// reshuffle.
+    struct Completion: Equatable {
+      enum Kind: Equatable { case created, queued }
+      let kind: Kind
+      let integration: Integration.Identifier
+      let title: String
+      let externalID: String?
+    }
 
     init(intent: ActionIntent, rawTranscript: String = "") {
       self.intent = intent
@@ -82,6 +103,9 @@ struct ActionConfirmationFeature {
     /// offline queue. Treated as a soft success: panel dismisses, no
     /// scary error UI — the queue will retry on reconnect.
     case executionQueued
+    /// Fired after the success badge has been on screen long enough to
+    /// register. Posts the dismiss notification that closes the panel.
+    case completionDismissed
   }
 
   @Dependency(\.reminders) var reminders
@@ -216,22 +240,42 @@ struct ActionConfirmationFeature {
           }
         }
 
-      case .executionSucceeded:
+      case let .executionSucceeded(externalID):
         state.isExecuting = false
         soundEffect.play(.pasteTranscript)
+        state.completion = .init(
+          kind: .created,
+          integration: state.selectedIntegration,
+          title: completionTitle(state),
+          externalID: externalID
+        )
         actionLogger.info("Action executed successfully")
-        return .run { _ in
-          NotificationCenter.default.post(name: .actionConfirmationExecuted, object: nil)
+        return .run { send in
+          // Hold the success badge long enough to be noticed before
+          // the panel dismisses. Matches the iOS sheet beat (1.4 s).
+          try? await Task.sleep(for: .milliseconds(1400))
+          await send(.completionDismissed)
         }
 
       case .executionQueued:
         state.isExecuting = false
         soundEffect.play(.pasteTranscript)
+        state.completion = .init(
+          kind: .queued,
+          integration: state.selectedIntegration,
+          title: completionTitle(state),
+          externalID: nil
+        )
         actionLogger.info("Action queued for offline retry")
-        // Soft-success: dismiss the panel like normal completion. The
-        // queue manager will replay on reconnect; if it ultimately
-        // exhausts retries, we surface that via a Settings UI row
-        // (see Phase 4) rather than re-presenting the panel.
+        // Soft-success: same beat as the success path, but the badge
+        // shows "Saved offline" so the user knows we'll retry rather
+        // than thinking it just disappeared.
+        return .run { send in
+          try? await Task.sleep(for: .milliseconds(1400))
+          await send(.completionDismissed)
+        }
+
+      case .completionDismissed:
         return .run { _ in
           NotificationCenter.default.post(name: .actionConfirmationExecuted, object: nil)
         }
@@ -249,6 +293,17 @@ struct ActionConfirmationFeature {
       }
     }
   }
+}
+
+/// Pulls the right "what was created" title out of state for the
+/// success badge. Gmail's title is its subject, every other integration
+/// uses `editableTitle`. Falls back to `(untitled)` when blank so the
+/// pill doesn't render as empty quotes.
+private func completionTitle(_ state: ActionConfirmationFeature.State) -> String {
+  if state.selectedIntegration == .gmail, !state.editableSubject.isEmpty {
+    return state.editableSubject
+  }
+  return state.editableTitle.isEmpty ? "(untitled)" : state.editableTitle
 }
 
 enum ActionConfirmationError: LocalizedError {

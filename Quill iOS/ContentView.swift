@@ -333,6 +333,14 @@ struct ContentView: View {
 
   @StateObject private var vm = RecordingViewModel()
   @StateObject private var notes = NotesStore.shared
+  /// View-model for the action confirmation sheet. Owned by ContentView
+  /// (rather than the sheet itself via @StateObject) so the sheet can
+  /// open *before* the LLM parse completes — we populate the
+  /// transcript here, present the sheet, and then call
+  /// `applyParsedIntent` once the parse returns. Using a single
+  /// long-lived instance also avoids the brief flicker that comes
+  /// from rebuilding the VM on every presentation.
+  @StateObject private var actionVM = ActionConfirmationViewModel(transcript: "")
   @EnvironmentObject private var deepLinks: QuillDeepLinkRouter
   @State private var showingSettings = false
   @State private var showingNotesList = false
@@ -492,9 +500,7 @@ struct ContentView: View {
         ShareSheet(items: req.items)
       }
       .sheet(isPresented: $showingActionConfirmation) {
-        if let intent = vm.parsedIntent {
-          ActionConfirmationSheet(intent: intent)
-        }
+        ActionConfirmationSheet(vm: actionVM)
       }
       .onAppear {
         idlePulse = true
@@ -539,11 +545,41 @@ struct ContentView: View {
         if case .done = newPhase, !vm.isActionRecording {
           appendTranscriptToActiveNote()
         }
-      }
-      .onChange(of: vm.parsedIntent) { _, intent in
-        if intent != nil {
+        // Open the confirmation sheet the moment we start parsing —
+        // the user sees their captured transcript in HEARD with a
+        // skeleton parsing card where WILL DO will land. When the
+        // parse returns, `vm.parsedIntent` flips and we populate the
+        // form (see the parsedIntent `onChange` below).
+        if case .actionParsing = newPhase, !showingActionConfirmation {
+          actionVM.startParsing(transcript: vm.rawTranscript)
           showingActionConfirmation = true
         }
+        // Parse failed (queue path or hard error) without `parsedIntent`
+        // ever landing → close the parsing sheet so the offline banner
+        // / error pill in the main UI can take over.
+        if case .done = newPhase,
+           vm.isActionRecording,
+           vm.parsedIntent == nil,
+           showingActionConfirmation,
+           actionVM.isParsing {
+          showingActionConfirmation = false
+        }
+        if case .error = newPhase,
+           showingActionConfirmation,
+           actionVM.isParsing {
+          showingActionConfirmation = false
+        }
+      }
+      .onChange(of: vm.parsedIntent) { _, intent in
+        guard let intent else { return }
+        if !showingActionConfirmation {
+          // Defensive — covers any path that lands an intent without
+          // first flipping into `.actionParsing` (shouldn't happen via
+          // normal flow, but the sheet should still open).
+          actionVM.startParsing(transcript: vm.rawTranscript)
+          showingActionConfirmation = true
+        }
+        actionVM.applyParsedIntent(intent)
       }
       .onReceive(NotificationCenter.default.publisher(for: .quillActionQueuedOffline)) { _ in
         // Show a transient pill above the FAB cluster acknowledging the

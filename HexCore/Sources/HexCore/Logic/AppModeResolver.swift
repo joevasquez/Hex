@@ -2,21 +2,29 @@ import Foundation
 
 /// Resolves the AI processing mode based on the active application.
 ///
-/// Custom user rules are checked first. If no custom rule matches,
-/// built-in defaults are used for common apps.
+/// Resolution order (first match wins):
+///   1. User-defined custom rules — always honored, even when the
+///      "Auto-select mode by app" toggle is off. Adding a rule is an
+///      explicit opt-in for that specific app, so requiring a second
+///      toggle to make it work would be a UX trap.
+///   2. Built-in heuristics (Mail → email, Slack → message, …) —
+///      gated by `contextAwareEnabled` so users who don't want any
+///      automatic behavior can leave the toggle off.
 public enum AppModeResolver {
   public static func resolve(
     bundleID: String?,
     customRules: [AppModeRule],
     contextAwareEnabled: Bool
   ) -> AIProcessingMode? {
-    guard contextAwareEnabled, let bundleID else { return nil }
+    guard let bundleID else { return nil }
 
-    // Custom rules take priority
-    if let rule = customRules.first(where: { $0.bundleIdentifier == bundleID }) {
+    // Custom rules take priority and are always honored.
+    if let rule = customRules.first(where: { !$0.bundleIdentifier.isEmpty && $0.bundleIdentifier == bundleID }) {
       return rule.mode
     }
 
+    // Built-in heuristics are gated by the explicit toggle.
+    guard contextAwareEnabled else { return nil }
     return defaultMode(for: bundleID)
   }
 

@@ -58,6 +58,7 @@ struct TranscriptionFeature {
     /// The raw transcript that was sent to the action LLM parser. Carried
     /// through to the confirmation panel so the "HEARD" section can quote it.
     var lastActionTranscript: String = ""
+    var recordingSessionID = UUID()
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -81,8 +82,8 @@ struct TranscriptionFeature {
     case discard  // Silent discard (too short/accidental)
 
     // Transcription result flow
-    case transcriptionResult(String, URL)
-    case transcriptionError(Error, URL?)
+    case transcriptionResult(String, URL, sessionID: UUID)
+    case transcriptionError(Error, URL?, sessionID: UUID)
     case aiProcessingFinished
     case contextCaptured(AppContext)
     case partialTranscriptUpdated(String)
@@ -209,10 +210,20 @@ struct TranscriptionFeature {
 
       // MARK: - Transcription Results
 
-      case let .transcriptionResult(result, audioURL):
+      case let .transcriptionResult(result, audioURL, sessionID):
+        guard sessionID == state.recordingSessionID else {
+          transcriptionFeatureLogger.info("Ignoring stale transcription result from session \(sessionID)")
+          return .run { _ in try? FileManager.default.removeItem(at: audioURL) }
+        }
         return handleTranscriptionResult(&state, result: result, audioURL: audioURL)
 
-      case let .transcriptionError(error, audioURL):
+      case let .transcriptionError(error, audioURL, sessionID):
+        guard sessionID == state.recordingSessionID else {
+          transcriptionFeatureLogger.info("Ignoring stale transcription error from session \(sessionID)")
+          return .run { _ in
+            if let audioURL { try? FileManager.default.removeItem(at: audioURL) }
+          }
+        }
         return handleTranscriptionError(&state, error: error, audioURL: audioURL)
 
       case .aiProcessingFinished:
@@ -597,11 +608,14 @@ private extension TranscriptionFeature {
         .run { _ in soundEffect.play(.cancel) }
       )
     }
+    state.recordingSessionID = UUID()
     state.pendingEditResult = nil
     state.editNeedsSelectionMessage = nil
     state.capturedContext = nil
     state.partialTranscript = ""
     state.inlineEditSelection = nil
+    state.isTranscribing = false
+    state.isAIProcessing = false
 
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
@@ -631,6 +645,7 @@ private extension TranscriptionFeature {
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
       .cancel(id: CancelID.liveTranscription),
+      .cancel(id: CancelID.transcription),
       .run { [sleepManagement, contextClient, preventSleep = state.hexSettings.preventSystemSleep] send in
         // Play sound immediately for instant feedback
         soundEffect.play(.startRecording)
@@ -729,6 +744,7 @@ private extension TranscriptionFeature {
     state.partialTranscript = ""
     let model = state.hexSettings.selectedModel
     let language = state.hexSettings.outputLanguage
+    let sessionID = state.recordingSessionID
 
     state.isPrewarming = true
 
@@ -757,10 +773,10 @@ private extension TranscriptionFeature {
           let result = try await transcription.transcribe(capturedURL, model, decodeOptions) { _ in }
 
           transcriptionFeatureLogger.notice("Transcribed audio from \(capturedURL.lastPathComponent) to text length \(result.count)")
-          await send(.transcriptionResult(result, capturedURL))
+          await send(.transcriptionResult(result, capturedURL, sessionID: sessionID))
         } catch {
           transcriptionFeatureLogger.error("Transcription failed: \(error.localizedDescription)")
-          await send(.transcriptionError(error, audioURL))
+          await send(.transcriptionError(error, audioURL, sessionID: sessionID))
         }
       }
       .cancellable(id: CancelID.transcription)
@@ -893,6 +909,7 @@ private extension TranscriptionFeature {
     let capturedContext = state.capturedContext
     let transcriptionHistory = state.$transcriptionHistory
     let inlineEditSelection = state.inlineEditSelection
+    let sessionID = state.recordingSessionID
 
     // Decision-tree log — emitted before every finalize so we can
     // see at a glance which branch (inline-edit vs normal paste)
@@ -1011,7 +1028,7 @@ private extension TranscriptionFeature {
           transcriptionHistory: transcriptionHistory
         )
       } catch {
-        await send(.transcriptionError(error, audioURL))
+        await send(.transcriptionError(error, audioURL, sessionID: sessionID))
       }
     }
     .cancellable(id: CancelID.transcription)

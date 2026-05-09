@@ -49,6 +49,8 @@ final class RecordingViewModel: ObservableObject {
   private var recorder = IOSRecordingClient.shared
   private var whisperKit: WhisperKit?
   private var timerTask: Task<Void, Never>?
+  private var transcriptionTask: Task<Void, Never>?
+  private var recordingSessionID = UUID()
   private var recordingStartedAt: Date?
   private var cancellables: Set<AnyCancellable> = []
 
@@ -155,6 +157,8 @@ final class RecordingViewModel: ObservableObject {
     // live preview (Whisper-based final transcript still works).
     _ = await recorder.requestSpeechPermission()
 
+    transcriptionTask?.cancel()
+    recordingSessionID = UUID()
     rawTranscript = ""
     processedTranscript = ""
     livePartial = ""
@@ -200,61 +204,68 @@ final class RecordingViewModel: ObservableObject {
       return
     }
 
-    do {
-      if whisperKit == nil || whisperKit?.modelFolder?.lastPathComponent != model {
-        whisperKit = try await WhisperKit(
-          WhisperKitConfig(model: model, download: true)
-        )
-      }
-
-      let results = try await whisperKit!.transcribe(audioPath: url.path)
-      let rawText = results.map(\.text).joined(separator: " ")
-      let cleaned = WhisperOutputCleaner.clean(rawText)
-      // Inline voice-command substitution: "period", "comma",
-      // "new paragraph" → real punctuation / line breaks. Runs before
-      // AI post-processing so downstream modes see properly-punctuated
-      // text. Gated by the user's Settings toggle.
-      let text = voiceCommandsEnabled
-        ? VoiceCommandSubstituter.substitute(in: cleaned)
-        : cleaned
-      if text != cleaned {
-        print("RecordingViewModel: applied voice-command substitutions")
-      }
-      rawTranscript = text
-
-      try? FileManager.default.removeItem(at: url)
-
-      if text.isEmpty {
-        phase = .error("No speech detected. Try again.")
-        return
-      }
-
-      let shouldRunAI = mode != .off || customSystemPrompt != nil
-      if shouldRunAI {
-        phase = .aiProcessing
-        do {
-          processedTranscript = try await TextAIClient.process(
-            text: text,
-            mode: mode,
-            provider: provider,
-            customSystemPrompt: customSystemPrompt
+    let sessionID = recordingSessionID
+    transcriptionTask?.cancel()
+    transcriptionTask = Task {
+      do {
+        if whisperKit == nil || whisperKit?.modelFolder?.lastPathComponent != model {
+          whisperKit = try await WhisperKit(
+            WhisperKitConfig(model: model, download: true)
           )
-        } catch {
-          // Fall through with the raw transcript so recording isn't
-          // lost. The console log tells us why (usually: missing key).
-          processedTranscript = ""
-          aiErrorMessage = "AI \(mode.displayName) failed — \(error.localizedDescription)"
-          print("TextAIClient failed: \(error.localizedDescription)")
         }
-      } else {
-        aiErrorMessage = nil
-      }
 
-      phase = .done
-      UINotificationFeedbackGenerator().notificationOccurred(.success)
-    } catch {
-      phase = .error("Transcription failed: \(error.localizedDescription)")
+        let results = try await whisperKit!.transcribe(audioPath: url.path)
+        let rawText = results.map(\.text).joined(separator: " ")
+        let cleaned = WhisperOutputCleaner.clean(rawText)
+        let text = voiceCommandsEnabled
+          ? VoiceCommandSubstituter.substitute(in: cleaned)
+          : cleaned
+        if text != cleaned {
+          print("RecordingViewModel: applied voice-command substitutions")
+        }
+
+        try? FileManager.default.removeItem(at: url)
+
+        guard sessionID == recordingSessionID else { return }
+
+        rawTranscript = text
+
+        if text.isEmpty {
+          phase = .error("No speech detected. Try again.")
+          return
+        }
+
+        let shouldRunAI = mode != .off || customSystemPrompt != nil
+        if shouldRunAI {
+          phase = .aiProcessing
+          do {
+            let processed = try await TextAIClient.process(
+              text: text,
+              mode: mode,
+              provider: provider,
+              customSystemPrompt: customSystemPrompt
+            )
+            guard sessionID == recordingSessionID else { return }
+            processedTranscript = processed
+          } catch {
+            guard sessionID == recordingSessionID else { return }
+            processedTranscript = ""
+            aiErrorMessage = "AI \(mode.displayName) failed — \(error.localizedDescription)"
+            print("TextAIClient failed: \(error.localizedDescription)")
+          }
+        } else {
+          aiErrorMessage = nil
+        }
+
+        guard sessionID == recordingSessionID else { return }
+        phase = .done
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+      } catch {
+        guard sessionID == recordingSessionID else { return }
+        phase = .error("Transcription failed: \(error.localizedDescription)")
+      }
     }
+    await transcriptionTask?.value
   }
 
   private func stopAndParseAction(
@@ -271,55 +282,61 @@ final class RecordingViewModel: ObservableObject {
       return
     }
 
-    do {
-      if whisperKit == nil || whisperKit?.modelFolder?.lastPathComponent != model {
-        whisperKit = try await WhisperKit(
-          WhisperKitConfig(model: model, download: true)
-        )
-      }
-
-      let results = try await whisperKit!.transcribe(audioPath: url.path)
-      let rawText = results.map(\.text).joined(separator: " ")
-      let cleaned = WhisperOutputCleaner.clean(rawText)
-      rawTranscript = cleaned
-
-      try? FileManager.default.removeItem(at: url)
-
-      if cleaned.isEmpty {
-        phase = .error("No speech detected. Try again.")
-        return
-      }
-
-      phase = .actionParsing
-      // Inner do/catch — transient network failures here become queued
-      // raw transcripts (replayed when connectivity returns), instead
-      // of being lost as a flash error. Outer catch still covers
-      // WhisperKit / file IO failures, which queueing wouldn't help.
+    let sessionID = recordingSessionID
+    transcriptionTask?.cancel()
+    transcriptionTask = Task {
       do {
-        let intent = try await IOSActionParsingClient.parse(
-          transcript: cleaned,
-          provider: provider
-        )
-        parsedIntent = intent
-        phase = .done
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-      } catch {
-        if QueueableErrorClassifier.isQueueable(error) {
-          await ActionQueueManager.shared.enqueueTranscript(
-            cleaned,
-            provider: provider,
-            lastError: error.localizedDescription
+        if whisperKit == nil || whisperKit?.modelFolder?.lastPathComponent != model {
+          whisperKit = try await WhisperKit(
+            WhisperKitConfig(model: model, download: true)
           )
-          phase = .done
-          UINotificationFeedbackGenerator().notificationOccurred(.warning)
-          NotificationCenter.default.post(name: .quillActionQueuedOffline, object: nil)
-        } else {
-          phase = .error("Action parsing failed: \(error.localizedDescription)")
         }
+
+        let results = try await whisperKit!.transcribe(audioPath: url.path)
+        let rawText = results.map(\.text).joined(separator: " ")
+        let cleaned = WhisperOutputCleaner.clean(rawText)
+
+        try? FileManager.default.removeItem(at: url)
+
+        guard sessionID == recordingSessionID else { return }
+        rawTranscript = cleaned
+
+        if cleaned.isEmpty {
+          phase = .error("No speech detected. Try again.")
+          return
+        }
+
+        phase = .actionParsing
+        do {
+          let intent = try await IOSActionParsingClient.parse(
+            transcript: cleaned,
+            provider: provider
+          )
+          guard sessionID == recordingSessionID else { return }
+          parsedIntent = intent
+          phase = .done
+          UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } catch {
+          guard sessionID == recordingSessionID else { return }
+          if QueueableErrorClassifier.isQueueable(error) {
+            await ActionQueueManager.shared.enqueueTranscript(
+              cleaned,
+              provider: provider,
+              lastError: error.localizedDescription
+            )
+            phase = .done
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            NotificationCenter.default.post(name: .quillActionQueuedOffline, object: nil)
+          } else {
+            phase = .error("Action parsing failed: \(error.localizedDescription)")
+          }
+        }
+      } catch {
+        guard sessionID == recordingSessionID else { return }
+        phase = .error("Action parsing failed: \(error.localizedDescription)")
       }
-    } catch {
-      phase = .error("Action parsing failed: \(error.localizedDescription)")
     }
+    await transcriptionTask?.value
   }
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1
+
+### Patch Changes
+
+- bc555a4: Fix stale transcription from previous session being pasted when recordings overlap
+
 ## 0.12.0
 
 ### Minor Changes

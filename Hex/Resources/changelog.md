@@ -1,53 +1,75 @@
 # Changelog
 
+## 0.12.1
+
+### Patch Changes
+
+- bc555a4: Fix stale transcription from previous session being pasted when recordings overlap
+
 ## 0.12.0
 
-### New
+### Minor Changes
 
-- **Cloud Sync (opt-in).** Notes and inline photos now sync across your devices via your Google account (GCP/Firestore + Cloud Storage). iOS↔Mac, with tombstone-based deletes so removing a note on one device doesn't resurrect it on the other. Mac gains a Notes viewer; iOS gains note editing. Enable in Settings → Cloud Sync.
-- **Per-app overrides (macOS).** Settings → AI gains an always-honored rules list that beats the default mode and the auto-select toggle. Add a per-app rule and the chosen mode fires every time you dictate into that app — no more relying on auto-select heuristics for the apps you use most.
-- **iOS Action confirmation parity.** The iOS confirmation sheet now matches the macOS panel — HEARD/WILL DO sections, integration chip selector at the top, dark-mode aware, and a completion badge before dismiss that deep-links to the integration's app. The sheet also opens during action parsing so you see your transcript while the LLM works.
+- a9eb5b3: Cloud Sync via GCP/Firestore: cross-device notes (iOS↔Mac), photo sync via Cloud Storage, tombstone-based deletes, iOS note editing, and macOS Notes viewer. Opt-in via Settings → Cloud Sync; requires connected Google account.
+- be6c4c7: iOS confirmation sheet now opens during action parsing (transcript visible while AI works), completion badges deep-link to the integration's app, and macOS Settings → AI gains a per-app overrides list (always-honored rules that beat the default mode and the auto-select toggle).
 
-### Fixes
+### Patch Changes
 
-- **Cloud Sync hardening.** GCS path encoding fix so download/delete work cross-device, debounced per-note uploads to prevent racing PATCHes, stable per-install device ID, orphaned photos cleaned up when bodies are edited, and sync triggers on scenePhase active rather than at launch.
+- f60fec2: iOS task confirmation now matches macOS panel (HEARD/WILL DO sections + integration chip selector + dark-mode aware) and both platforms show a completion badge before dismissing.
+- 534624f: Cloud Sync hardening: fix GCS path encoding (download/delete now work cross-device), debounce per-note uploads to prevent racing PATCHes, use stable per-install device ID, clean up orphaned photos when bodies are edited, and trigger sync on scenePhase active rather than at launch.
 
 ## 0.11.0
 
-### New
+### Minor Changes
 
-- **Live transcript under the HUD (macOS).** While you dictate, a card under the recording pill shows what you're saying in real time — powered by Apple's on-device speech recognizer running in parallel with Whisper/Parakeet. The accurate final transcript is still produced by your selected model on release; the live card is just a preview so you know we're hearing you. Card height grows from one line up to four, then keeps the latest words visible. Grant the new "Speech Recognition" permission on first launch.
-- **Redesigned Action confirmation panel (macOS).** The post-dictation confirmation now shows a **HEARD** section quoting what we transcribed, a **WILL DO** preview card with the structured fields the integration will receive (each row inline-editable via the pencil), and a single purple **Run action** button (`↵` to fire). Replaces the old form-style sheet.
-- **Pre-pick where actions go (macOS).** In Action mode, a chip row appears under the HUD listing your connected integrations — Apple Reminders, Calendar, Todoist, Gmail, Google Calendar (when signed in). Tap a chip to **lock** that integration: the next dictation goes there regardless of how you phrase it. Each chip carries an `fn N` badge so you can also press **fn + 1**, **fn + 2**, etc. to toggle without clicking. Tap again (or press the same shortcut) to release the lock and let the LLM decide.
+- Live transcript HUD card via on-device speech recognition, redesigned Action confirmation panel (HEARD/WILL DO), and HUD integration picker with fn+1..fn+9 hard-lock shortcuts in Action mode
 
-## 0.10.0
+## 0.8.0
 
-### New
+### Minor Changes
 
-- **Action mode (iOS).** The third home-screen button (orange ⚡) brings full Action mode to iOS — five working integrations (Apple Reminders, Apple Calendar, Todoist, Gmail, Google Calendar). Speak "remind me to call Mike Friday" or "schedule a 30-minute standup tomorrow at 9am" and a confirmation sheet lets you tweak title / due date / list / attendees before committing.
-- **Google sign-in (Gmail + Google Calendar).** A single sign-in unlocks both services. macOS and iOS use `ASWebAuthenticationSession` + PKCE against an iOS-type Google Cloud OAuth client — Desktop-type clients have been rejected by Google for custom URI scheme redirects since 2022, and the new flow stores no client secret. Sign in via Settings → Accounts → Google or directly through the integration row.
-- **Offline action queue.** Dictate a voice action while offline (subway, plane, weak Wi-Fi), and the intent (or even the raw transcript when the LLM is unreachable) is persisted to disk and replayed automatically when connectivity returns. Inspect / retry / discard pending items from Settings → Offline (iOS) or Settings → General → Offline Queue (macOS). On macOS, the menu-bar dropdown shows a count when items are pending.
-- **Search across notes (iOS) and transcripts (macOS).** Notes list gets a custom search field that matches title, body, and location. macOS Settings → History gets a `.searchable` field that matches transcript text and source app name (so "slack" finds everything you dictated into Slack).
-- **Anonymous crash reporting (opt-in).** Settings → Privacy → "Send anonymous crash reports" wires up Sentry on both platforms. Off by default — when on, we send stack traces + OS version, never your transcripts, audio, notes, or contacts.
-- **iOS UI overhaul.**
-  - "Ready when you are." pre-recording landing with three example-utterance chips that map by color to the FAB cluster (purple mic / orange bolt / purple camera).
-  - Recording state shows a live-transcript card that auto-scrolls to newest, plus a 32-bar lavender waveform pinned to the bottom of the screen above a single + button.
-  - The three FABs (camera / action / mic) collapse into a single + button that fans up on tap. While recording, the + flips to a red stop button — single-tap to stop.
-  - Mode picker is now a dropdown pill that greys out modes when no AI provider key is configured + alerts the user to add one in Settings.
-  - Notes list rebuilt with a custom purple header band matching the home screen, frosted-circle New + Close buttons, custom search field, and visible rename + delete pills on every row (delete now confirms via alert).
+- c9c12db: iOS: AI analyzes each attached photo — summary, key details, and transcribed text land as a card under the photo and in PDF exports
+- c9c12db: iOS: add inline photos to notes — tap camera to insert a photo between dictations (groundwork for AI photo summaries)
+- c0c195a: iOS Action mode (Reminders, Calendar, Todoist, Gmail, Google Calendar) with offline queue + waveform recording state + Ready-when-you-are home, Google sign-in via OAuth+PKCE on both platforms, error monitoring infrastructure (opt-in Sentry), keyword search across iOS notes + macOS history, redesigned iOS FAB cluster (single + that fans up to dictate/photo/action), date-parser fix for 'tomorrow morning at 2pm'-style phrasing.
+- 99ea885: iOS: proper bullet/heading rendering, expanded note canvas, delete from main screen
+- d221e9c: Inline voice commands: 'period', 'comma', 'new paragraph', etc. now work mid-sentence (not just as standalone utterances). macOS + iOS; toggleable in Settings.
+- 89a1426: iOS + Mac: Custom AI modes (user-authored prompts), Mac Inline Edit commands (voice-driven in-place editing of selected text), Integrations surface (Todoist/Reminders/Notion/Things/Slack/Linear placeholders), iOS home-screen widget source + setup guide.
+- c9c12db: iOS: editable note titles + export note as PDF (text + inline photos)
+- a1f1329: **Action mode is live.** The third HUD pill (Dictate → Edit → Action) now turns voice commands into real tasks. Speak "Add to Todoist write email to Mike" or "Remind me to review the launch deck on Friday" and a confirmation panel drops down from the menu bar with editable fields — title, due date, list/project, priority — that you can tweak before clicking Create.
 
-### Fixes
+  - **Apple Reminders** is built in (no setup; uses EventKit).
+  - **Todoist** is the first third-party adapter — paste your API token in Settings → Integrations → Connect (validates against `/api/v1/projects` before saving to Keychain).
+  - **The LLM picks the integration from voice context** ("to Todoist", "remind me", etc.) and strips the integration phrase from the title. You can override the pick from the panel before submitting.
+  - Per-integration UI: Reminders shows List + Notes; Todoist adds Project + P1–P4 priority.
 
-- **"Tomorrow morning at 2pm" parses correctly.** The natural-language date parser previously returned today-at-9am whenever you added a time-of-day qualifier ("morning", "afternoon", "evening", "night") to a today/tomorrow phrase. Now matches via `.contains` instead of strict equality, plus the LLM is coached to drop redundant qualifiers when an explicit time is present. 14 new regression tests pin the behavior.
-- **Free-tier integration cap.** Pro integrations (Gmail, Google Calendar, etc.) no longer count against the 2-integration free-tier limit. Previously, signing into Google immediately filled the cap and disabled every other Connect button.
-- **iOS Google integrations no longer appear "disconnected" after sign-in.** OAuth keychain state is now treated as authoritative for Gmail / Google Calendar; a launch-time backfill repairs the integration set whenever it falls out of sync with the keychain.
+  **Mode-cycle hotkey.** A second global shortcut (Settings → Recording → Hot Key → Cycle Mode) cycles the HUD pill between Dictate / Edit / Action without triggering a recording.
 
-### Internal
+  **UX polish.**
 
-- New iOS adapters: `IOSRemindersAdapter`, `IOSCalendarAdapter`, `IOSTodoistAdapter`, `IOSGmailAdapter`, `IOSGoogleCalendarAdapter`, `IOSGoogleOAuthClient`, `IOSActionParsingClient`, `IOSSystemActionQueueExecutor`, `IOSActionQueueParser`.
-- New shared HexCore modules: `Errors/` (protocol-based error monitoring), `Offline/` (action queue + retry policy + network monitor), `Logic/ActionSystemPrompt`, `Logic/DateTimeParser`.
-- New iOS UI components in `Quill iOS/Views/`: `QuillHeaderBar`, `QuillActiveNoteStrip`, `QuillFABCluster`, `QuillModeDropdown`, `QuillEmptyHome`, `QuillRecordingState`.
-- macOS `GoogleOAuthClient` rewritten on `ASWebAuthenticationSession` + PKCE; URL-callback routing in `HexAppDelegate` removed (no longer needed).
+  - Edit mode now shows a single Undo chip after an inline edit, auto-dismissing after 8s (the Keep button is gone — the edit auto-commits silently).
+  - The Settings/History sidebar toggle now uses your system accent color instead of the old purple.
+  - The volume slider in Settings → General slides out smoothly when Sound Effects is toggled off.
+  - "Highlight text first" chip now fires when you trigger Edit mode without a selection — recording is cancelled instead of pasting your instruction as literal text.
+
+  **Security & store readiness.**
+
+  - Privacy manifests (`PrivacyInfo.xcprivacy`) shipped for both targets — required for App Store submission.
+  - ATS is no longer disabled globally; Quill relies on default macOS HTTPS enforcement.
+  - iOS clients now use `os.log` with `, privacy: .private` annotations everywhere transcript text could leak (was previously logging the first 400 chars of every API response via `print()`).
+  - AppleScript paste-fallback escaping now handles backslashes in addition to quotes.
+
+### Patch Changes
+
+- 1c545cc: AI post-processing no longer treats the transcript as a conversation — wraps user content in <transcript> tags and falls back to raw text when the model still refuses. Also fixes Email mode emitting a literal "<Your name>" placeholder.
+- 55c777e: macOS: paste reliably lands in the app you were dictating into. Reactivates the source app before pasting, refuses to paste into Quill itself, and always syncs the clipboard to the transcription so manual Cmd+V fallback always gives you what you just said.
+- d221e9c: macOS: fix 'pastes old clipboard instead of transcription' race — bumped clipboard restore delay from 500ms to 1.5s and skip restore if clipboard changed in the interim.
+- c9c12db: Fix iOS keychain read: API keys saved in Settings weren't being found by photo analysis (kSecAttrAccessible shouldn't be in lookup queries)
+- 3afb124: AI post-processing is now strictly cleanup-only — never invents greetings, closings, names, or signatures. Email mode in particular no longer prepends 'Hi,' or appends 'Best,' / 'Thanks,' / a name unless the speaker dictated them.
+- 713b9f7: macOS: fix unreliable paste — AX-insertion now verifies the text actually landed (some Electron / custom inputs silently drop the set), and the whole paste flow checks Accessibility permission upfront so when it's missing the text is left in the clipboard with a clear log message instead of vanishing.
+- 350a124: macOS: never paste the wrong content. Switched primary paste path to Accessibility-based text insertion (bypasses the clipboard entirely), and flipped the clipboard-restore default so we don't race against slow paste handlers. Fixes a bug where a previously-copied API key could be pasted instead of the transcription.
+- da470e2: macOS: fix blank menu bar icon (SF Symbol 'feather' doesn't exist — ship a real template NSImage built from the Feather asset)
+- c0c195a: Settings reorganization: Recording tab is now the comprehensive recording hub (model, mic, hotkeys, during-recording behavior, output, history). General tab slimmed to permissions + sound + app toggles. AI tab restructured into Provider / Default Mode / Behavior subsections. Sidebar gets a min-width and slightly polished pill toggle so Settings/History buttons no longer get crushed at narrow widths.
+- b78f049: Stop priming the sound-effects audio engine when sound effects are disabled so Hex avoids unnecessary background audio activity and sleep assertions (#200).
 
 ## 0.9.0
 
@@ -84,8 +106,8 @@
 ### Fixes
 
 - **macOS: paste reliably lands in the right app, every time.** The remaining unreliability — "sometimes my transcription shows up, sometimes I paste my previous clipboard" — traced to three compounding bugs:
-  1. The paste targeted *whichever app was frontmost when transcription finished*, not the app the user was dictating into. If you Cmd-Tabbed away while Whisper or AI post-processing was running (1–3 seconds), the paste landed in the wrong window.
-  2. The Accessibility-insertion path bypasses the clipboard entirely, so if AX landed in the wrong element and you tried to `Cmd+V` manually in your actual target, you pasted whatever was in the clipboard *before* Quill ran (API keys, etc.).
+  1. The paste targeted _whichever app was frontmost when transcription finished_, not the app the user was dictating into. If you Cmd-Tabbed away while Whisper or AI post-processing was running (1–3 seconds), the paste landed in the wrong window.
+  2. The Accessibility-insertion path bypasses the clipboard entirely, so if AX landed in the wrong element and you tried to `Cmd+V` manually in your actual target, you pasted whatever was in the clipboard _before_ Quill ran (API keys, etc.).
   3. Nothing stopped a paste from writing into Quill's own Settings / History window.
 - **Fix:** Quill now remembers which app you started recording in and reactivates it before pasting (with a short settle-time for focus to update), refuses to paste into itself, and after every successful paste syncs the transcription into the clipboard — so manual `Cmd+V` fallback always gives you the dictation, never stale content.
 
@@ -123,11 +145,11 @@
 
 ### New
 
-- **Inline voice commands.** Phrases like `period`, `comma`, `question mark`, `colon`, `semicolon`, `new paragraph`, `new line`, and `full stop` are now converted to punctuation and line breaks *mid-sentence* — not only when spoken alone. So "hello comma world period new paragraph welcome" becomes `Hello, world.\n\nWelcome` before AI post-processing runs. Standalone `undo`, `redo`, and `select all` still trigger the corresponding editor commands. Toggleable under Settings → AI Enhancement → Voice Commands.
+- **Inline voice commands.** Phrases like `period`, `comma`, `question mark`, `colon`, `semicolon`, `new paragraph`, `new line`, and `full stop` are now converted to punctuation and line breaks _mid-sentence_ — not only when spoken alone. So "hello comma world period new paragraph welcome" becomes `Hello, world.\n\nWelcome` before AI post-processing runs. Standalone `undo`, `redo`, and `select all` still trigger the corresponding editor commands. Toggleable under Settings → AI Enhancement → Voice Commands.
 
 ### Fixes
 
-- **Paste reliability.** Fixed a race where releasing the record hotkey in a slow-to-respond app (Chrome, Arc, Slack, Electron apps, first paste after launch) could paste your *previous* clipboard contents instead of the transcription. The clipboard restore now waits 1.5 s instead of 500 ms and skips the restore entirely if anything else has written to the clipboard in the meantime.
+- **Paste reliability.** Fixed a race where releasing the record hotkey in a slow-to-respond app (Chrome, Arc, Slack, Electron apps, first paste after launch) could paste your _previous_ clipboard contents instead of the transcription. The clipboard restore now waits 1.5 s instead of 500 ms and skips the restore entirely if anything else has written to the clipboard in the meantime.
 
 ## 0.8.1
 

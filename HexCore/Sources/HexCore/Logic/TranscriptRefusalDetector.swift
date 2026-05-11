@@ -59,6 +59,17 @@ public enum TranscriptRefusalDetector {
     "i am sorry",
     "sorry, i",
     "sorry but",
+    // Conversational hedging / meta-commentary
+    "i notice",
+    "i see that",
+    "i'd like to",
+    "i would like to",
+    "let me clarify",
+    "this is ambiguous",
+    "this input is ambiguous",
+    "the instruction is ambiguous",
+    "i need clarification",
+    "i need more context",
     // Asking the user for content (the model is having a
     // conversation instead of transforming text)
     "could you please provide",

@@ -78,6 +78,7 @@ struct TranscriptionIndicatorView: View {
   /// User's hard-locked Action integration, if any. The locked button
   /// shows full tint + a white ring.
   var lockedActionIntegration: Integration.Identifier?
+  var isPinnedToTop: Bool = false
   var onCycleMode: () -> Void
   var onEditAccept: () -> Void
   var onEditUndo: () -> Void
@@ -90,8 +91,8 @@ struct TranscriptionIndicatorView: View {
       pill
         .onTapGesture { onCycleMode() }
         .compositingGroup()
-        .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
-        .shadow(color: shadowGlow.opacity(0.3), radius: 12)
+        .shadow(color: .black.opacity(isPinnedToTop ? 0 : 0.35), radius: 8, y: 4)
+        .shadow(color: shadowGlow.opacity(isPinnedToTop ? 0 : 0.3), radius: 12)
 
       // Action mode: row of toggleable integration buttons. Sits between
       // the pill and the live transcript card so the user can pick a
@@ -340,17 +341,25 @@ struct TranscriptionIndicatorView: View {
 
   // MARK: - Visual Helpers
 
+  @ViewBuilder
   private var pillBackground: some View {
-    Capsule()
-      .fill(.ultraThinMaterial)
-      .overlay(
-        Capsule()
-          .fill(backgroundTint)
+    if isPinnedToTop {
+      let shape = UnevenRoundedRectangle(
+        topLeadingRadius: 0,
+        bottomLeadingRadius: 14,
+        bottomTrailingRadius: 14,
+        topTrailingRadius: 0
       )
-      .overlay(
-        Capsule()
-          .strokeBorder(.white.opacity(0.2), lineWidth: 1)
-      )
+      shape
+        .fill(.ultraThinMaterial)
+        .overlay(shape.fill(backgroundTint))
+        .overlay(shape.strokeBorder(.white.opacity(0.2), lineWidth: 1))
+    } else {
+      Capsule()
+        .fill(.ultraThinMaterial)
+        .overlay(Capsule().fill(backgroundTint))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 1))
+    }
   }
 
   private var backgroundTint: Color {

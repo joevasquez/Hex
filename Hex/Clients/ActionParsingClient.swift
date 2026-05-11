@@ -9,53 +9,71 @@ private let actionLogger = HexLog.action
 @DependencyClient
 struct ActionParsingClient {
   var parse: @Sendable (String, AIProvider) async throws -> ActionIntent
+  var parseMulti: @Sendable (String, AIProvider) async throws -> MultiActionResponse
 }
 
 extension ActionParsingClient: DependencyKey {
   static var liveValue: Self {
     .init(
       parse: { transcript, provider in
-        @Dependency(\.keychain) var keychain
-
-        let apiKey: String
-        switch provider {
-        case .openAI:
-          guard let key = await keychain.read(KeychainKey.openAIAPIKey), !key.isEmpty else {
-            throw ActionParsingError.missingAPIKey(provider)
-          }
-          apiKey = key
-        case .anthropic:
-          guard let key = await keychain.read(KeychainKey.anthropicAPIKey), !key.isEmpty else {
-            throw ActionParsingError.missingAPIKey(provider)
-          }
-          apiKey = key
+        let response = try await parseTranscript(transcript, provider: provider)
+        guard let intent = response.actions.first else {
+          throw ActionParsingError.parseFailure("Empty actions array")
         }
-
-        actionLogger.info("Parsing action from \(transcript.count, privacy: .public) chars via \(provider.displayName, privacy: .public)")
-
-        let jsonString: String
-        switch provider {
-        case .openAI:
-          jsonString = try await callOpenAI(transcript: transcript, apiKey: apiKey)
-        case .anthropic:
-          jsonString = try await callAnthropic(transcript: transcript, apiKey: apiKey)
-        }
-
-        let cleaned = jsonString
-          .replacingOccurrences(of: "```json", with: "")
-          .replacingOccurrences(of: "```", with: "")
-          .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let data = cleaned.data(using: .utf8) else {
-          throw ActionParsingError.parseFailure(cleaned)
-        }
-
-        let intent = try JSONDecoder().decode(ActionIntent.self, from: data)
-        actionLogger.info("Parsed action: type=\(intent.actionType.rawValue, privacy: .public) title=\(intent.title, privacy: .private)")
         return intent
+      },
+      parseMulti: { transcript, provider in
+        try await parseTranscript(transcript, provider: provider)
       }
     )
   }
+}
+
+private func parseTranscript(_ transcript: String, provider: AIProvider) async throws -> MultiActionResponse {
+  @Dependency(\.keychain) var keychain
+
+  let apiKey: String
+  switch provider {
+  case .openAI:
+    guard let key = await keychain.read(KeychainKey.openAIAPIKey), !key.isEmpty else {
+      throw ActionParsingError.missingAPIKey(provider)
+    }
+    apiKey = key
+  case .anthropic:
+    guard let key = await keychain.read(KeychainKey.anthropicAPIKey), !key.isEmpty else {
+      throw ActionParsingError.missingAPIKey(provider)
+    }
+    apiKey = key
+  }
+
+  actionLogger.info("Parsing action from \(transcript.count, privacy: .public) chars via \(provider.displayName, privacy: .public)")
+
+  let jsonString: String
+  switch provider {
+  case .openAI:
+    jsonString = try await callOpenAI(transcript: transcript, apiKey: apiKey)
+  case .anthropic:
+    jsonString = try await callAnthropic(transcript: transcript, apiKey: apiKey)
+  }
+
+  let cleaned = jsonString
+    .replacingOccurrences(of: "```json", with: "")
+    .replacingOccurrences(of: "```", with: "")
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+  guard let data = cleaned.data(using: .utf8) else {
+    throw ActionParsingError.parseFailure(cleaned)
+  }
+
+  // Try multi-action format first, fall back to single intent wrapped in array
+  if let response = try? JSONDecoder().decode(MultiActionResponse.self, from: data) {
+    actionLogger.info("Parsed \(response.actions.count, privacy: .public) action(s)")
+    return response
+  }
+
+  let intent = try JSONDecoder().decode(ActionIntent.self, from: data)
+  actionLogger.info("Parsed action: type=\(intent.actionType.rawValue, privacy: .public) title=\(intent.title, privacy: .private)")
+  return MultiActionResponse(actions: [intent])
 }
 
 extension DependencyValues {
@@ -89,7 +107,7 @@ private func callOpenAI(transcript: String, apiKey: String) async throws -> Stri
       ["role": "user", "content": userMessage],
     ],
     "temperature": 0.1,
-    "max_tokens": 512,
+    "max_tokens": 1024,
   ]
   request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -128,7 +146,7 @@ private func callAnthropic(transcript: String, apiKey: String) async throws -> S
     "model": AIProvider.anthropic.defaultModel,
     "system": actionSystemPrompt,
     "messages": [["role": "user", "content": userMessage]],
-    "max_tokens": 512,
+    "max_tokens": 1024,
   ]
   request.httpBody = try JSONSerialization.data(withJSONObject: body)
 

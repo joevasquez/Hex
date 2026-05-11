@@ -84,6 +84,7 @@ struct SettingsFeature {
     case keyEvent(KeyEvent)
     case toggleOpenOnLogin(Bool)
     case toggleShowDockIcon(Bool)
+    case toggleHudPinnedToTop(Bool)
     case togglePreventSystemSleep(Bool)
     case setRecordingAudioBehavior(RecordingAudioBehavior)
     case toggleSuperFastMode(Bool)
@@ -518,6 +519,18 @@ struct SettingsFeature {
         return .run { _ in
           await MainActor.run {
             NotificationCenter.default.post(name: .updateAppMode, object: nil)
+          }
+        }
+
+      case let .toggleHudPinnedToTop(pinned):
+        state.$hexSettings.withLock { $0.hudPinnedToTop = pinned }
+        return .run { [pinned] _ in
+          await MainActor.run {
+            NotificationCenter.default.post(
+              name: .hudPositionModeChanged,
+              object: nil,
+              userInfo: ["pinned": pinned]
+            )
           }
         }
 

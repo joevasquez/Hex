@@ -9,6 +9,17 @@ enum IOSActionParsingClient {
     transcript: String,
     provider: AIProvider
   ) async throws -> ActionIntent {
+    let response = try await parseMulti(transcript: transcript, provider: provider)
+    guard let intent = response.actions.first else {
+      throw TextAIError.invalidResponse
+    }
+    return intent
+  }
+
+  static func parseMulti(
+    transcript: String,
+    provider: AIProvider
+  ) async throws -> MultiActionResponse {
     let account: String
     switch provider {
     case .anthropic: account = KeychainKey.anthropicAPIKey
@@ -27,7 +38,7 @@ enum IOSActionParsingClient {
       raw = try await callOpenAI(transcript: transcript, apiKey: key)
     }
 
-    return try parseJSON(raw)
+    return try parseMultiJSON(raw)
   }
 
   // MARK: - Anthropic
@@ -45,7 +56,7 @@ enum IOSActionParsingClient {
       "model": AIProvider.anthropic.defaultModel,
       "system": ActionSystemPrompt.prompt,
       "messages": [["role": "user", "content": transcript]],
-      "max_tokens": 512,
+      "max_tokens": 1024,
     ]
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -77,7 +88,7 @@ enum IOSActionParsingClient {
         ["role": "user", "content": transcript],
       ],
       "temperature": 0.1,
-      "max_tokens": 512,
+      "max_tokens": 1024,
     ]
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -106,6 +117,14 @@ enum IOSActionParsingClient {
   // MARK: - JSON parsing
 
   private static func parseJSON(_ text: String) throws -> ActionIntent {
+    let response = try parseMultiJSON(text)
+    guard let intent = response.actions.first else {
+      throw TextAIError.invalidResponse
+    }
+    return intent
+  }
+
+  private static func parseMultiJSON(_ text: String) throws -> MultiActionResponse {
     var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
     if cleaned.hasPrefix("```json") {
       cleaned = String(cleaned.dropFirst(7))
@@ -121,6 +140,11 @@ enum IOSActionParsingClient {
       throw TextAIError.invalidResponse
     }
 
-    return try JSONDecoder().decode(ActionIntent.self, from: data)
+    if let response = try? JSONDecoder().decode(MultiActionResponse.self, from: data) {
+      return response
+    }
+
+    let intent = try JSONDecoder().decode(ActionIntent.self, from: data)
+    return MultiActionResponse(actions: [intent])
   }
 }

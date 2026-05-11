@@ -108,6 +108,7 @@ struct TranscriptionFeature {
 
     // Action mode
     case actionIntentParsed(ActionIntent)
+    case multiActionIntentsParsed([ActionIntent])
     case actionParsingFailed(String)
     /// Network failure caught during LLM parsing; the raw transcript was
     /// persisted to the offline queue and will be re-parsed + executed
@@ -116,6 +117,7 @@ struct TranscriptionFeature {
     case actionExecuted
     case actionCancelled
     case presentActionConfirmation(ActionIntent, String)
+    case presentMultiActionConfirmation([ActionIntent], String)
     case actionIntegrationsLoaded([Integration.Identifier])
     case toggleActionIntegrationLock(Integration.Identifier)
     case loadActionIntegrations
@@ -331,6 +333,20 @@ struct TranscriptionFeature {
         let raw = state.lastActionTranscript
         return .send(.presentActionConfirmation(resolvedIntent, raw))
 
+      case let .multiActionIntentsParsed(intents):
+        // Multi-action: apply hard-lock to all intents if set.
+        var resolvedIntents = intents
+        if let locked = state.lockedActionIntegration {
+          resolvedIntents = intents.map { intent in
+            var r = intent
+            r.targetIntegration = locked
+            return r
+          }
+        }
+        state.pendingAction = resolvedIntents.first
+        let raw = state.lastActionTranscript
+        return .send(.presentMultiActionConfirmation(resolvedIntents, raw))
+
       case let .actionParsingFailed(rawText):
         transcriptionFeatureLogger.warning("Action parsing failed; falling back to paste")
         let bundleID = state.sourceAppBundleID
@@ -361,6 +377,14 @@ struct TranscriptionFeature {
         return .run { _ in
           await MainActor.run {
             ActionConfirmationNotification.post(intent: intent, rawTranscript: rawTranscript)
+          }
+        }
+
+      case let .presentMultiActionConfirmation(intents, rawTranscript):
+        transcriptionFeatureLogger.info("Posting multi-action confirmation notification for \(intents.count, privacy: .public) intents")
+        return .run { _ in
+          await MainActor.run {
+            ActionConfirmationNotification.postMulti(intents: intents, rawTranscript: rawTranscript)
           }
         }
 
@@ -978,9 +1002,13 @@ private extension TranscriptionFeature {
       state.lastActionTranscript = modifiedResult
       return .run { [actionParsing] send in
         do {
-          let intent = try await actionParsing.parse(modifiedResult, aiProvider)
+          let response = try await actionParsing.parseMulti(modifiedResult, aiProvider)
           await send(.aiProcessingFinished)
-          await send(.actionIntentParsed(intent))
+          if response.isSingleAction, let intent = response.actions.first {
+            await send(.actionIntentParsed(intent))
+          } else {
+            await send(.multiActionIntentsParsed(response.actions))
+          }
         } catch {
           transcriptionFeatureLogger.error("Action parsing failed: \(error.localizedDescription)")
           await send(.aiProcessingFinished)
@@ -1256,6 +1284,7 @@ struct TranscriptionView: View {
       partialTranscript: store.partialTranscript,
       actionIntegrations: store.availableActionIntegrations,
       lockedActionIntegration: store.lockedActionIntegration,
+      isPinnedToTop: store.hexSettings.hudPinnedToTop,
       onCycleMode: { store.send(.cycleMode) },
       onEditAccept: { store.send(.inlineEditAccept) },
       onEditUndo: { store.send(.inlineEditUndo) },

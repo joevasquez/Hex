@@ -1290,7 +1290,7 @@ struct TranscriptionView: View {
       onEditUndo: { store.send(.inlineEditUndo) },
       onToggleActionIntegration: { id in store.send(.toggleActionIntegrationLock(id)) }
     )
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: store.hexSettings.hudPinnedToTop ? .top : .center)
     .task {
       await store.send(.task).finish()
     }

@@ -409,26 +409,26 @@ private func sendUndoToSourceApp(bundleID: String?) async {
 /// model to output only the transformed text — no preamble, no
 /// surrounding tags, no "here's the edit" commentary.
 public enum InlineEditPrompt {
-  public static let systemPrompt: String = {
-    AIProcessingMode.preamble + """
+  public static let systemPrompt: String = """
+    You are an inline text editor. The user dictated a voice instruction while they had text selected in another app. Your job is to apply that instruction to the selected text.
 
+    The user message contains two parts:
+    - `Instruction: <what the user said>` — the editing instruction.
+    - `<selection>...</selection>` — the text to edit.
 
-      Transformation: You are editing text. The user dictated an instruction and selected a piece of text to apply the instruction to.
+    Rules:
+    1. Apply the instruction to the text inside `<selection>` and return ONLY the edited text.
+    2. NEVER INVENT CONTENT beyond what the instruction asks for. Do not add greetings, closings, signatures, or words the user didn't ask for.
+    3. Preserve whatever the user didn't ask you to change — tone, word choice, voice, formatting — unless the instruction specifically targets it.
+    4. No preamble ("Here's the edit"), no commentary, no wrapping tags, no quotes around the output.
 
-      The user message will contain:
-      - `Instruction: <what the user said>`
-      - `<selection>...</selection>` tags wrapping the text to edit
-
-      Apply the instruction to the text inside `<selection>` and return ONLY the edited text. No preamble ("Here's the edit"), no commentary, no wrapping tags, no quotes around the output. Preserve whatever the user didn't ask you to change — tone, word choice, voice — unless the instruction specifically asks you to change it.
-
-      Examples of instructions:
-        - "tighten 20%" → condense while preserving meaning.
-        - "make it warmer" → more friendly, less formal.
-        - "convert to bullets" → render as a `- ` bullet list.
-        - "translate to Spanish" → output the Spanish translation only.
-        - "fix typos" → fix obvious errors, leave style alone.
-      """
-  }()
+    Examples of instructions:
+      - "tighten 20%" → condense while preserving meaning.
+      - "make it warmer" → more friendly, less formal.
+      - "convert to bullets" → render as a `- ` bullet list.
+      - "translate to Spanish" → output the Spanish translation only.
+      - "fix typos" → fix obvious errors, leave style alone.
+    """
 
   /// Build the user message to send alongside the system prompt.
   public static func userMessage(instruction: String, selection: String) -> String {

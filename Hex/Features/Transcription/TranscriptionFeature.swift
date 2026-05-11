@@ -967,7 +967,8 @@ private extension TranscriptionFeature {
             .clean,
             aiProvider,
             nil,
-            InlineEditPrompt.systemPrompt
+            InlineEditPrompt.systemPrompt,
+            true
           )
           await send(.aiProcessingFinished)
 
@@ -1038,7 +1039,7 @@ private extension TranscriptionFeature {
         var finalResult = modifiedResult
         if aiEnabled {
           do {
-            finalResult = try await aiProcessing.process(modifiedResult, resolvedMode, aiProvider, capturedContext, nil)
+            finalResult = try await aiProcessing.process(modifiedResult, resolvedMode, aiProvider, capturedContext, nil, false)
             transcriptionFeatureLogger.info("AI processing produced \(finalResult.count) chars from \(modifiedResult.count) chars")
           } catch {
             transcriptionFeatureLogger.error("AI processing failed, using unprocessed text: \(error.localizedDescription)")

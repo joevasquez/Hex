@@ -23,13 +23,22 @@ struct AIProcessingClient {
   /// needing a parallel code path. When nil, the built-in mode's
   /// prompt is used as before. AppContext enrichment still applies
   /// on top of whichever prompt is chosen.
-  var process: @Sendable (String, AIProcessingMode, AIProvider, AppContext?, String?) async throws -> String
+  /// - Parameters:
+  ///   - text: The user message to send to the LLM.
+  ///   - mode: The built-in AI processing mode (ignored when customSystemPrompt is non-nil).
+  ///   - provider: Which LLM provider to use.
+  ///   - context: Optional app context for prompt enrichment.
+  ///   - customSystemPrompt: Optional system prompt override.
+  ///   - skipTranscriptWrapping: When `true`, the message is sent as-is
+  ///     without `<transcript>` tag wrapping. Used by inline edit, whose
+  ///     message already has its own structure (`Instruction:` + `<selection>`).
+  var process: @Sendable (String, AIProcessingMode, AIProvider, AppContext?, String?, Bool) async throws -> String
 }
 
 extension AIProcessingClient: DependencyKey {
   static var liveValue: Self {
     .init(
-      process: { text, mode, provider, context, customSystemPrompt in
+      process: { text, mode, provider, context, customSystemPrompt, skipTranscriptWrapping in
         // customSystemPrompt wins; when nil we use the built-in
         // mode's prompt. If both resolve to empty (mode == .off and
         // no custom prompt provided), skip the LLM entirely.
@@ -50,7 +59,7 @@ extension AIProcessingClient: DependencyKey {
               aiLogger.warning("OpenAI API key not configured; skipping AI processing")
               return text
             }
-            response = try await callOpenAI(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
+            response = try await callOpenAI(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey, skipTranscriptWrapping: skipTranscriptWrapping)
 
           case .anthropic:
             guard let apiKey = await keychain.read(KeychainKey.anthropicAPIKey),
@@ -59,7 +68,7 @@ extension AIProcessingClient: DependencyKey {
               aiLogger.warning("Anthropic API key not configured; skipping AI processing")
               return text
             }
-            response = try await callAnthropic(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey)
+            response = try await callAnthropic(text: text, systemPrompt: enrichedPrompt, apiKey: apiKey, skipTranscriptWrapping: skipTranscriptWrapping)
           }
         } catch {
           // Capture LLM call failures (network / API / decoding) so we
@@ -109,7 +118,7 @@ extension DependencyValues {
 
 // MARK: - OpenAI
 
-private func callOpenAI(text: String, systemPrompt: String, apiKey: String) async throws -> String {
+private func callOpenAI(text: String, systemPrompt: String, apiKey: String, skipTranscriptWrapping: Bool = false) async throws -> String {
   let url = URL(string: "https://api.openai.com/v1/chat/completions")!
   var request = URLRequest(url: url)
   request.httpMethod = "POST"
@@ -117,12 +126,7 @@ private func callOpenAI(text: String, systemPrompt: String, apiKey: String) asyn
   request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
   request.timeoutInterval = 15
 
-  // Wrap the user message in <transcript> tags that the system prompt
-  // tells the model to treat as DATA rather than a conversation —
-  // critical for preventing the model from answering questions that
-  // appear in the transcript ("do you want to join this call?" → the
-  // model responding as itself instead of just punctuating).
-  let userMessage = TranscriptWrapper.wrap(text)
+  let userMessage = skipTranscriptWrapping ? text : TranscriptWrapper.wrap(text)
 
   let body: [String: Any] = [
     "model": AIProvider.openAI.defaultModel,
@@ -166,7 +170,7 @@ private func callOpenAI(text: String, systemPrompt: String, apiKey: String) asyn
 
 // MARK: - Anthropic
 
-private func callAnthropic(text: String, systemPrompt: String, apiKey: String) async throws -> String {
+private func callAnthropic(text: String, systemPrompt: String, apiKey: String, skipTranscriptWrapping: Bool = false) async throws -> String {
   let url = URL(string: "https://api.anthropic.com/v1/messages")!
   var request = URLRequest(url: url)
   request.httpMethod = "POST"
@@ -175,7 +179,7 @@ private func callAnthropic(text: String, systemPrompt: String, apiKey: String) a
   request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
   request.timeoutInterval = 15
 
-  let userMessage = TranscriptWrapper.wrap(text)
+  let userMessage = skipTranscriptWrapping ? text : TranscriptWrapper.wrap(text)
 
   let body: [String: Any] = [
     "model": AIProvider.anthropic.defaultModel,

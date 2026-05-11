@@ -37,6 +37,8 @@ final class RecordingViewModel: ObservableObject {
   /// Set when an Action recording finishes parsing. ContentView
   /// presents the confirmation sheet in response.
   @Published var parsedIntent: ActionIntent?
+  /// Set when multiple action intents are parsed from a single recording.
+  @Published var parsedMultiIntents: [ActionIntent]?
   /// True when the current recording was started via the Action FAB.
   var isActionRecording: Bool = false
   /// True while the WhisperKit model is loading (first launch, or
@@ -133,6 +135,7 @@ final class RecordingViewModel: ObservableObject {
     case .idle, .done, .error:
       isActionRecording = true
       parsedIntent = nil
+      parsedMultiIntents = nil
       await startRecording(model: model, mode: .off, provider: provider)
     case .recording:
       await stopAndParseAction(model: model, provider: provider)
@@ -308,12 +311,16 @@ final class RecordingViewModel: ObservableObject {
 
         phase = .actionParsing
         do {
-          let intent = try await IOSActionParsingClient.parse(
+          let response = try await IOSActionParsingClient.parseMulti(
             transcript: cleaned,
             provider: provider
           )
           guard sessionID == recordingSessionID else { return }
-          parsedIntent = intent
+          if response.isSingleAction, let intent = response.actions.first {
+            parsedIntent = intent
+          } else {
+            parsedMultiIntents = response.actions
+          }
           phase = .done
           UINotificationFeedbackGenerator().notificationOccurred(.success)
         } catch {
@@ -375,6 +382,8 @@ struct ContentView: View {
   @State private var pendingDeleteNoteID: UUID?
   @State private var editingNoteID: UUID?
   @State private var showingActionConfirmation = false
+  @State private var showingMultiActionConfirmation = false
+  @StateObject private var multiActionVM = MultiActionConfirmationViewModel()
   /// Transient banner state — set true when an action mode item is queued
   /// because we're offline. Auto-clears after a few seconds via the task
   /// kicked off in `.onReceive`.
@@ -520,6 +529,9 @@ struct ContentView: View {
       .sheet(isPresented: $showingActionConfirmation) {
         ActionConfirmationSheet(vm: actionVM)
       }
+      .sheet(isPresented: $showingMultiActionConfirmation) {
+        MultiActionConfirmationSheet(vm: multiActionVM)
+      }
       .sheet(isPresented: Binding(
         get: { editingNoteID != nil },
         set: { if !$0 { editingNoteID = nil } }
@@ -606,6 +618,15 @@ struct ContentView: View {
           showingActionConfirmation = true
         }
         actionVM.applyParsedIntent(intent)
+      }
+      .onChange(of: vm.parsedMultiIntents) { _, intents in
+        guard let intents, !intents.isEmpty else { return }
+        // Close parsing sheet if open and present multi-action instead
+        if showingActionConfirmation {
+          showingActionConfirmation = false
+        }
+        multiActionVM.applyParsedIntents(intents, rawTranscript: vm.rawTranscript)
+        showingMultiActionConfirmation = true
       }
       .onReceive(NotificationCenter.default.publisher(for: .quillActionQueuedOffline)) { _ in
         // Show a transient pill above the FAB cluster acknowledging the

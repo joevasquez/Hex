@@ -60,6 +60,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 			object: nil
 		)
 
+		// Sync Google integration state from OAuth keychain on launch
+		syncGoogleIntegrationsFromOAuth()
+
 		// Start long-running app effects (global hotkeys, permissions, etc.)
 		startLifecycleTasksIfNeeded()
 
@@ -118,6 +121,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		)
 		let hudView = TranscriptionView(store: transcriptionStore)
 		hudPanel = HUDPanel.hosting(hudView)
+		if hexSettings.hudPinnedToTop {
+			hudPanel?.setPinned(true)
+		}
 		hudPanel?.orderFrontRegardless()
 	}
 
@@ -161,6 +167,29 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		}
 	}
 
+	// MARK: - Google Integration Sync
+
+	private func syncGoogleIntegrationsFromOAuth() {
+		let key = IntegrationConnectionStore.userDefaultsKey
+		let raw = UserDefaults.standard.data(forKey: key)
+		var current = IntegrationConnectionStore.decode(raw)
+		let hasGoogleEmail = UserDefaults.standard.string(forKey: GoogleOAuthClient.googleAccountEmailDefaultsKey) != nil
+
+		if hasGoogleEmail {
+			let needsInsert = !current.contains(.gmail) || !current.contains(.googleCalendar)
+			guard needsInsert else { return }
+			current.insert(.gmail)
+			current.insert(.googleCalendar)
+			UserDefaults.standard.set(IntegrationConnectionStore.encode(current), forKey: key)
+		} else {
+			let needsRemove = current.contains(.gmail) || current.contains(.googleCalendar)
+			guard needsRemove else { return }
+			current.remove(.gmail)
+			current.remove(.googleCalendar)
+			UserDefaults.standard.set(IntegrationConnectionStore.encode(current), forKey: key)
+		}
+	}
+
 	// MARK: - Action Confirmation
 
 	private func observeActionConfirmation() {
@@ -168,6 +197,12 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 			self,
 			selector: #selector(handleActionConfirmation(_:)),
 			name: .presentActionConfirmation,
+			object: nil
+		)
+		NotificationCenter.default.addObserver(
+			self,
+			selector: #selector(handleMultiActionConfirmation(_:)),
+			name: .presentMultiActionConfirmation,
 			object: nil
 		)
 		NotificationCenter.default.addObserver(
@@ -195,6 +230,17 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		}
 	}
 
+	@objc
+	private func handleMultiActionConfirmation(_ notification: Notification) {
+		guard let intents = notification.userInfo?[ActionConfirmationNotification.intentsKey] as? [ActionIntent] else {
+			return
+		}
+		let rawTranscript = (notification.userInfo?[ActionConfirmationNotification.rawTranscriptKey] as? String) ?? ""
+		Task { @MainActor [weak self] in
+			self?.presentMultiActionConfirmation(intents: intents, rawTranscript: rawTranscript)
+		}
+	}
+
 	@MainActor
 	func presentActionConfirmation(intent: ActionIntent, rawTranscript: String = "") {
 		HexLog.action.info("Presenting action confirmation panel: \(intent.title, privacy: .private)")
@@ -214,6 +260,27 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		panel.makeKey()
 		actionPanel = panel
 		HexLog.action.info("Action panel ordered front at frame: \(NSStringFromRect(panel.frame), privacy: .public)")
+	}
+
+	@MainActor
+	func presentMultiActionConfirmation(intents: [ActionIntent], rawTranscript: String = "") {
+		HexLog.action.info("Presenting multi-action confirmation panel: \(intents.count, privacy: .public) actions")
+		dismissActionPanel()
+
+		let multiStore = Store(
+			initialState: MultiActionConfirmationFeature.State(intents: intents, rawTranscript: rawTranscript)
+		) {
+			MultiActionConfirmationFeature()
+		}
+
+		let panel = ActionConfirmationPanel.hosting(
+			MultiActionConfirmationView(store: multiStore)
+		)
+		panel.positionBelowStatusBar()
+		panel.orderFrontRegardless()
+		panel.makeKey()
+		actionPanel = panel
+		HexLog.action.info("Multi-action panel ordered front at frame: \(NSStringFromRect(panel.frame), privacy: .public)")
 	}
 
 	@objc

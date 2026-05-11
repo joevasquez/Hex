@@ -15,6 +15,7 @@ class HUDPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 
   private static let positionKey = "com.joevasquez.Quill.hudPosition"
+  private(set) var isPinned: Bool = false
 
   init() {
     let styleMask: NSWindow.StyleMask = [
@@ -60,10 +61,43 @@ class HUDPanel: NSPanel {
       name: NSWindow.didMoveNotification,
       object: self
     )
+
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleHUDPositionModeChanged(_:)),
+      name: .hudPositionModeChanged,
+      object: nil
+    )
   }
 
   deinit {
     NotificationCenter.default.removeObserver(self)
+  }
+
+  // MARK: - Position Mode
+
+  func setPinned(_ pinned: Bool) {
+    isPinned = pinned
+    if pinned {
+      isMovableByWindowBackground = false
+      pinToTop()
+    } else {
+      isMovableByWindowBackground = true
+      restorePosition()
+    }
+  }
+
+  @objc private func handleHUDPositionModeChanged(_ notification: Notification) {
+    let pinned = (notification.userInfo?["pinned"] as? Bool) ?? false
+    setPinned(pinned)
+  }
+
+  private func pinToTop() {
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+    let visible = screen.visibleFrame
+    let x = visible.midX - frame.width / 2
+    let y = visible.maxY - frame.height
+    setFrameOrigin(NSPoint(x: x, y: y))
   }
 
   // MARK: - Position Persistence
@@ -95,9 +129,6 @@ class HUDPanel: NSPanel {
   }
 
   private func centerOnMainScreen() {
-    // Prefer `NSScreen.main` when available, but fall back to the first
-    // screen — `NSScreen.main` is the screen with key focus and can be
-    // nil during early launch when the app hasn't activated.
     guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
     // Use `visibleFrame` (excludes menu bar + dock) so we don't tuck the
     // pill behind the menu bar. `setFrameOrigin` positions the panel's
@@ -111,6 +142,7 @@ class HUDPanel: NSPanel {
   }
 
   @objc private func windowDidMove(_ notification: Notification) {
+    guard !isPinned else { return }
     let origin = frame.origin
     UserDefaults.standard.set(
       ["x": origin.x, "y": origin.y],

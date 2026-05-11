@@ -36,6 +36,18 @@ struct GeneralSectionView: View {
 			} icon: {
 				Image(systemName: "dock.rectangle")
 			}
+
+			Label {
+				Toggle(
+					"Pin HUD to Top",
+					isOn: Binding(
+						get: { store.hexSettings.hudPinnedToTop },
+						set: { store.send(.toggleHudPinnedToTop($0)) }
+					)
+				)
+			} icon: {
+				Image(systemName: "pin")
+			}
 		} header: {
 			Text("App")
 		}

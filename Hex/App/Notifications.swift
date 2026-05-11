@@ -6,14 +6,19 @@ extension NSNotification.Name {
   static let updateAppMode = NSNotification.Name("UpdateAppMode")
   /// Posted when an action intent is parsed and ready for user confirmation.
   static let presentActionConfirmation = NSNotification.Name("PresentActionConfirmation")
+  /// Posted when multiple action intents are parsed and ready for user confirmation.
+  static let presentMultiActionConfirmation = NSNotification.Name("PresentMultiActionConfirmation")
   /// Posted when an action is successfully executed.
   static let actionConfirmationExecuted = NSNotification.Name("ActionConfirmationExecuted")
   /// Posted when an action confirmation is cancelled.
   static let actionConfirmationCancelled = NSNotification.Name("ActionConfirmationCancelled")
+  /// Posted when HUD position mode changes (floating ↔ pinned).
+  static let hudPositionModeChanged = NSNotification.Name("HUDPositionModeChanged")
 }
 
 enum ActionConfirmationNotification {
   static let intentKey = "actionIntent"
+  static let intentsKey = "actionIntents"
   static let rawTranscriptKey = "rawTranscript"
 
   static func post(intent: ActionIntent, rawTranscript: String = "") {
@@ -22,6 +27,17 @@ enum ActionConfirmationNotification {
       object: nil,
       userInfo: [
         intentKey: intent,
+        rawTranscriptKey: rawTranscript,
+      ]
+    )
+  }
+
+  static func postMulti(intents: [ActionIntent], rawTranscript: String = "") {
+    NotificationCenter.default.post(
+      name: .presentMultiActionConfirmation,
+      object: nil,
+      userInfo: [
+        intentsKey: intents,
         rawTranscriptKey: rawTranscript,
       ]
     )

@@ -138,12 +138,16 @@ struct GoogleAccountSectionView: View {
     let authorized = await googleOAuth.isAuthorized()
     isAuthorized = authorized
     if authorized {
-      // Prefer the cached email (no network) — fall back to userinfo if cache
-      // is empty (e.g. user signed in before this section existed).
       if let cached = UserDefaults.standard.string(forKey: GoogleOAuthClient.googleAccountEmailDefaultsKey) {
         connectedEmail = cached
       } else {
         connectedEmail = await googleOAuth.fetchUserEmail()
+      }
+      var current = IntegrationConnectionStore.decode(connectedData)
+      if !current.contains(.gmail) || !current.contains(.googleCalendar) {
+        current.insert(.gmail)
+        current.insert(.googleCalendar)
+        connectedData = IntegrationConnectionStore.encode(current)
       }
     } else {
       connectedEmail = nil

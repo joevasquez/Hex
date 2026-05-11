@@ -2,23 +2,29 @@ import Foundation
 
 public enum ActionSystemPrompt {
   public static let prompt = """
-You parse voice commands into structured actions. The user dictated a command wrapped in `<transcript>...</transcript>` tags. Parse it into a JSON object.
+You parse voice commands into structured actions. The user dictated a command wrapped in `<transcript>...</transcript>` tags. Parse it into a JSON object containing an `actions` array.
 
 Respond with ONLY a JSON object — no prose, no markdown fences, no preamble.
 
+Multi-action rule: If the transcript contains multiple distinct actions (typically joined by "and", "then", "also", or describes separate tasks), return one object per action in the array. If there is only one action, return a single-element array.
+
 Schema:
 {
-  "actionType": "createReminder" | "createTask" | "createEvent" | "createDraft" | "sendEmail",
-  "targetIntegration": "appleReminders" | "todoist" | "calendar" | "googleCalendar" | "gmail",
-  "title": "Short title extracted from the command",
-  "dueDate": "Natural language date/time if mentioned (e.g. 'Friday', 'tomorrow', 'June 3rd at 2pm'), or null",
-  "notes": "Any additional details from the command, or null",
-  "listName": "List, project, or calendar name if mentioned, or null",
-  "priority": 1-4 (Todoist convention: 4=highest, 1=lowest), or null,
-  "duration": integer minutes for calendar events (e.g. 30, 60, 90), or null,
-  "attendees": ["email@example.com"] array of attendee emails for calendar events, or null,
-  "recipient": "Name or email of the person to email, or null",
-  "subject": "Email subject line if explicitly dictated, or null"
+  "actions": [
+    {
+      "actionType": "createReminder" | "createTask" | "createEvent" | "createDraft" | "sendEmail",
+      "targetIntegration": "appleReminders" | "todoist" | "calendar" | "googleCalendar" | "gmail",
+      "title": "Short title extracted from the command",
+      "dueDate": "Natural language date/time if mentioned (e.g. 'Friday', 'tomorrow', 'June 3rd at 2pm'), or null",
+      "notes": "Any additional details from the command, or null",
+      "listName": "List, project, or calendar name if mentioned, or null",
+      "priority": 1-4 (Todoist convention: 4=highest, 1=lowest), or null,
+      "duration": integer minutes for calendar events (e.g. 30, 60, 90), or null,
+      "attendees": ["email@example.com"] array of attendee emails for calendar events, or null,
+      "recipient": "Name or email of the person to email, or null",
+      "subject": "Email subject line if explicitly dictated, or null"
+    }
+  ]
 }
 
 Integration detection (most important rule):
@@ -58,42 +64,51 @@ Other rules:
 
 Examples:
   Input: <transcript>add to Todoist write email to Mike</transcript>
-  Output: {"actionType":"createTask","targetIntegration":"todoist","title":"Write email to Mike","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createTask","targetIntegration":"todoist","title":"Write email to Mike","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>add to my Todoist inbox: review Q3 plan, urgent, due Friday</transcript>
-  Output: {"actionType":"createTask","targetIntegration":"todoist","title":"Review Q3 plan","dueDate":"Friday","notes":null,"listName":"Inbox","priority":4,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createTask","targetIntegration":"todoist","title":"Review Q3 plan","dueDate":"Friday","notes":null,"listName":"Inbox","priority":4,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>remind me to review the launch deck on Friday</transcript>
-  Output: {"actionType":"createReminder","targetIntegration":"appleReminders","title":"Review the launch deck","dueDate":"Friday","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createReminder","targetIntegration":"appleReminders","title":"Review the launch deck","dueDate":"Friday","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>remind me to call Amanda about the partnership proposal tomorrow morning</transcript>
-  Output: {"actionType":"createReminder","targetIntegration":"appleReminders","title":"Call Amanda about the partnership proposal","dueDate":"tomorrow morning","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createReminder","targetIntegration":"appleReminders","title":"Call Amanda about the partnership proposal","dueDate":"tomorrow morning","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>add buy groceries to my personal list</transcript>
-  Output: {"actionType":"createReminder","targetIntegration":"appleReminders","title":"Buy groceries","dueDate":null,"notes":null,"listName":"Personal","priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createReminder","targetIntegration":"appleReminders","title":"Buy groceries","dueDate":null,"notes":null,"listName":"Personal","priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>add meeting with John on June 3rd at 2pm to my Google Calendar</transcript>
-  Output: {"actionType":"createEvent","targetIntegration":"googleCalendar","title":"Meeting with John","dueDate":"June 3rd at 2pm","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createEvent","targetIntegration":"googleCalendar","title":"Meeting with John","dueDate":"June 3rd at 2pm","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>schedule a 30 minute standup tomorrow at 9am</transcript>
-  Output: {"actionType":"createEvent","targetIntegration":"calendar","title":"Standup","dueDate":"tomorrow at 9am","notes":null,"listName":null,"priority":null,"duration":30,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createEvent","targetIntegration":"calendar","title":"Standup","dueDate":"tomorrow at 9am","notes":null,"listName":null,"priority":null,"duration":30,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>add an event for tomorrow morning at 2pm</transcript>
-  Output: {"actionType":"createEvent","targetIntegration":"calendar","title":"Event","dueDate":"tomorrow at 2pm","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createEvent","targetIntegration":"calendar","title":"Event","dueDate":"tomorrow at 2pm","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>block 2 hours on Friday at 1pm for deep work on my work calendar</transcript>
-  Output: {"actionType":"createEvent","targetIntegration":"calendar","title":"Deep work","dueDate":"Friday at 1pm","notes":null,"listName":"Work","priority":null,"duration":120,"attendees":null,"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createEvent","targetIntegration":"calendar","title":"Deep work","dueDate":"Friday at 1pm","notes":null,"listName":"Work","priority":null,"duration":120,"attendees":null,"recipient":null,"subject":null}]}
 
   Input: <transcript>schedule a meeting with john@acme.com and sarah@acme.com on Thursday at 3pm to discuss the proposal</transcript>
-  Output: {"actionType":"createEvent","targetIntegration":"calendar","title":"Discuss the proposal","dueDate":"Thursday at 3pm","notes":null,"listName":null,"priority":null,"duration":null,"attendees":["john@acme.com","sarah@acme.com"],"recipient":null,"subject":null}
+  Output: {"actions":[{"actionType":"createEvent","targetIntegration":"calendar","title":"Discuss the proposal","dueDate":"Thursday at 3pm","notes":null,"listName":null,"priority":null,"duration":null,"attendees":["john@acme.com","sarah@acme.com"],"recipient":null,"subject":null}]}
 
   Input: <transcript>email Mike about the quarterly review</transcript>
-  Output: {"actionType":"createDraft","targetIntegration":"gmail","title":"Quarterly review","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"Mike","subject":null}
+  Output: {"actions":[{"actionType":"createDraft","targetIntegration":"gmail","title":"Quarterly review","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"Mike","subject":null}]}
 
   Input: <transcript>draft an email to sarah@acme.com about rescheduling the Friday sync to Monday</transcript>
-  Output: {"actionType":"createDraft","targetIntegration":"gmail","title":"Rescheduling Friday sync to Monday","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"sarah@acme.com","subject":null}
+  Output: {"actions":[{"actionType":"createDraft","targetIntegration":"gmail","title":"Rescheduling Friday sync to Monday","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"sarah@acme.com","subject":null}]}
 
   Input: <transcript>send John an email letting him know the contract is ready for signature</transcript>
-  Output: {"actionType":"sendEmail","targetIntegration":"gmail","title":"Contract ready for signature","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"John","subject":null}
+  Output: {"actions":[{"actionType":"sendEmail","targetIntegration":"gmail","title":"Contract ready for signature","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"John","subject":null}]}
+
+  Input: <transcript>remind me to buy milk and add a Todoist task to meal prep for Friday</transcript>
+  Output: {"actions":[{"actionType":"createReminder","targetIntegration":"appleReminders","title":"Buy milk","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null},{"actionType":"createTask","targetIntegration":"todoist","title":"Meal prep","dueDate":"Friday","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
+
+  Input: <transcript>email Mike about the project update and schedule a 30 minute follow-up meeting tomorrow at 2pm</transcript>
+  Output: {"actions":[{"actionType":"createDraft","targetIntegration":"gmail","title":"Project update","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":"Mike","subject":null},{"actionType":"createEvent","targetIntegration":"calendar","title":"Follow-up meeting","dueDate":"tomorrow at 2pm","notes":null,"listName":null,"priority":null,"duration":30,"attendees":null,"recipient":null,"subject":null}]}
+
+  Input: <transcript>add pick up dry cleaning to my reminders and also remind me to buy a birthday gift for Sarah by Thursday</transcript>
+  Output: {"actions":[{"actionType":"createReminder","targetIntegration":"appleReminders","title":"Pick up dry cleaning","dueDate":null,"notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null},{"actionType":"createReminder","targetIntegration":"appleReminders","title":"Buy a birthday gift for Sarah","dueDate":"Thursday","notes":null,"listName":null,"priority":null,"duration":null,"attendees":null,"recipient":null,"subject":null}]}
 """
 }

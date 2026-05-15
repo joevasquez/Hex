@@ -100,8 +100,9 @@ struct TranscriptionFeature {
     case editNeedsSelectionDismiss
     /// Result of the clipboard fallback capture (Cmd+C → read).
     /// Sent when AX-based selection reading failed and we tried the
-    /// clipboard path instead.
-    case editClipboardFallbackResult(String?)
+    /// clipboard path instead. `isEditMode` controls failure behavior:
+    /// Edit mode cancels transcription; Dictate mode falls through.
+    case editClipboardFallbackResult(String?, isEditMode: Bool)
     case inlineEditApplied(PendingEditResult)
     case inlineEditAccept
     case inlineEditUndo
@@ -263,15 +264,15 @@ struct TranscriptionFeature {
         state.editNeedsSelectionMessage = nil
         return .none
 
-      case let .editClipboardFallbackResult(selection):
+      case let .editClipboardFallbackResult(selection, isEditMode):
         if let selection {
           state.inlineEditSelection = selection
           let charCount = selection.count
           transcriptionFeatureLogger.info(
-            "Edit mode: clipboard fallback captured \(charCount) chars"
+            "Inline edit: clipboard fallback captured \(charCount) chars (isEditMode=\(isEditMode))"
           )
           return .none
-        } else {
+        } else if isEditMode {
           state.editNeedsSelectionMessage = "Highlight text first"
           state.isTranscribing = false
           state.isPrewarming = false
@@ -287,6 +288,11 @@ struct TranscriptionFeature {
             }
             .cancellable(id: CancelID.editNeedsSelectionTimer, cancelInFlight: true)
           )
+        } else {
+          transcriptionFeatureLogger.info(
+            "Dictate mode: both AX and clipboard capture failed — falling through to normal paste path"
+          )
+          return .none
         }
 
       case let .inlineEditApplied(pending):
@@ -806,19 +812,20 @@ private extension TranscriptionFeature {
       .cancellable(id: CancelID.transcription)
     )
 
-    // If Edit mode and AX didn't capture, run clipboard fallback
-    // (~150 ms) in parallel with transcription (~1-3 s). The
-    // fallback result lands via editClipboardFallbackResult well
-    // before handleTranscriptionResult needs it.
-    if isEditMode && state.inlineEditSelection == nil {
+    // If AX didn't capture and we attempted it (Edit mode or
+    // inlineEditEnabled), run clipboard fallback (~150 ms) in
+    // parallel with transcription (~1-3 s). The fallback result
+    // lands via editClipboardFallbackResult well before
+    // handleTranscriptionResult needs it.
+    if (isEditMode || state.hexSettings.inlineEditEnabled) && state.inlineEditSelection == nil {
       transcriptionFeatureLogger.info(
-        "Edit mode: AX returned nil at stop — trying clipboard fallback in parallel with transcription"
+        "Inline edit: AX returned nil at stop (isEditMode=\(isEditMode)) — trying clipboard fallback in parallel with transcription"
       )
       return .merge(
         transcriptionEffect,
         .run { [inlineEdit] send in
           let selection = await inlineEdit.captureSelectionViaClipboard()
-          await send(.editClipboardFallbackResult(selection))
+          await send(.editClipboardFallbackResult(selection, isEditMode: isEditMode))
         }
       )
     }

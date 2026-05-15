@@ -563,11 +563,17 @@ struct PasteboardClientLive {
         // `before` read are given the benefit of the doubt (the
         // verification is skipped) — otherwise we'd break valid
         // inserts into elements that only expose selected text.
-        if beforeValue != nil {
+        if let before = beforeValue {
             var afterRef: CFTypeRef?
             let afterStatus = AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &afterRef)
             let afterValue = (afterStatus == .success) ? (afterRef as? String) : nil
-            if let before = beforeValue, let after = afterValue, before == after {
+            // Treat an unreadable post-write value as failure too —
+            // if the element exposed its value before but not after,
+            // we can't confirm the text landed. Falling through to
+            // clipboard+Cmd+V may double-paste in the rare case AX
+            // did work, but that's visible and undoable — unlike the
+            // silent no-paste when we optimistically return here.
+            guard let after = afterValue, after != before else {
                 throw PasteError.failedToInsertText
             }
         }

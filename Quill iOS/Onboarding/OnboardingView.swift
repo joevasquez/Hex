@@ -2,94 +2,165 @@
 //  OnboardingView.swift
 //  Quill (iOS)
 //
-//  Four-step welcome tour shown the first time someone opens Quill.
-//  Designed to feel celebratory and quick rather than instructional —
-//  most steps have a single big CTA, and animations carry continuity
-//  between them so the feather feels like a guide.
+//  Seven-step onboarding flow with a branching plan choice.
+//  Light paper/cream theme with purple accents.
 //
 //  Steps:
-//    1. Welcome — feather floats in + typewriter wordmark.
-//    2. Permissions — request mic + speech (live partial preview).
-//    3. AI setup — pick provider + paste API key (skippable).
-//    4. First note — guided dictation that lands in a real note.
-//
-//  Completion is persisted via `@AppStorage` so we never show the
-//  tour twice. A "Replay Tutorial" hook in Settings → Productivity
-//  resets the flag and re-launches the flow.
+//    1. Welcome       — feather + tagline
+//    2. Permissions    — mic (required) + speech recognition (optional)
+//    3. Plan choice    — Pro trial vs BYOK
+//    4a. Pro trial     — subscription info (branch A)
+//    4b. BYOK phone   — provider picker + API key entry (branch B)
+//    5. Google sign-in — optional Google OAuth
+//    6. First dictation — visual HUD mock
+//    7. Done           — celebration + try-it cards
 //
 
+import AVFoundation
 import Combine
 import HexCore
 import Speech
 import SwiftUI
 
+// MARK: - Color Palette
+
+private enum OB {
+  static let purple = Color(red: 0.486, green: 0.227, blue: 0.929)
+  static let purpleLight = Color(red: 0.961, green: 0.941, blue: 1.0)
+  static let purpleMid = Color(red: 0.706, green: 0.553, blue: 1.0)
+  static let purpleDark = Color(red: 0.357, green: 0.129, blue: 0.714)
+  static let paper = Color(red: 0.957, green: 0.945, blue: 0.925)
+  static let paperElev = Color(red: 0.984, green: 0.976, blue: 0.961)
+  static let ink = Color(red: 0.110, green: 0.110, blue: 0.118)
+  static let inkSoft = Color(red: 0.294, green: 0.286, blue: 0.318)
+  static let inkMute = Color(red: 0.502, green: 0.490, blue: 0.525)
+  static let line = Color.black.opacity(0.10)
+  static let proGreen = Color(red: 0.122, green: 0.478, blue: 0.227)
+  static let conRed = Color(red: 0.757, green: 0.271, blue: 0.137)
+}
+
+// MARK: - Step & Plan Enums
+
+private enum OnboardingStep: Int {
+  case welcome = 0
+  case permissions = 1
+  case planChoice = 2
+  case proTrial = 3   // branch A
+  case byokPhone = 4  // branch B (single consolidated screen)
+  case googleSignIn = 5
+  case firstDictation = 6
+  case done = 7
+
+  /// Map to dot position (0-6) for the 7-position indicator.
+  var dotIndex: Int {
+    switch self {
+    case .welcome: return 0
+    case .permissions: return 1
+    case .planChoice: return 2
+    case .proTrial, .byokPhone: return 3
+    case .googleSignIn: return 4
+    case .firstDictation: return 5
+    case .done: return 6
+    }
+  }
+}
+
+private enum PlanChoice {
+  case pro, byok
+}
+
+// MARK: - Root View
+
 struct OnboardingView: View {
   @Environment(\.dismiss) private var dismiss
   @Binding var hasCompletedOnboarding: Bool
-  @State private var step: OnboardingStep = .welcome
-  @State private var animateFeather = false
 
-  enum OnboardingStep: Int, CaseIterable {
-    case welcome
-    case permissions
-    case ai
-    case googleSignIn
-    case firstNote
-  }
+  @State private var step: OnboardingStep = .welcome
+  @State private var selectedPlan: PlanChoice?
+  @State private var selectedProvider: AIProvider = .anthropic
+  @AppStorage(QuillIOSSettingsKey.selectedPlan) private var persistedPlan: String?
 
   var body: some View {
     ZStack {
       OnboardingBackground()
 
-      // Step content swaps with a directional slide so the user
-      // always feels like they're moving forward.
       Group {
         switch step {
-        case .welcome:    WelcomeStep(onContinue: { advance() })
-        case .permissions: PermissionsStep(onContinue: { advance() })
-        case .ai:          AIKeyStep(onContinue: { advance() }, onSkip: { advance() })
-        case .googleSignIn: GoogleSignInStep(onContinue: { advance() }, onSkip: { advance() })
-        case .firstNote:   FirstNoteStep(onFinish: complete)
+        case .welcome:
+          WelcomeStep(onContinue: { advance(to: .permissions) })
+        case .permissions:
+          PermissionsStep(onContinue: { advance(to: .planChoice) })
+        case .planChoice:
+          PlanChoiceStep(
+            onProTrial: {
+              selectedPlan = .pro
+              persistedPlan = "pro"
+              advance(to: .proTrial)
+            },
+            onBYOK: {
+              selectedPlan = .byok
+              persistedPlan = "byok"
+              advance(to: .byokPhone)
+            }
+          )
+        case .proTrial:
+          ProTrialStep(
+            onContinue: { advance(to: .googleSignIn) },
+            onSwitchBYOK: {
+              selectedPlan = .byok
+              persistedPlan = "byok"
+              advance(to: .byokPhone)
+            }
+          )
+        case .byokPhone:
+          BYOKPhoneStep(
+            selectedProvider: $selectedProvider,
+            onContinue: { advance(to: .googleSignIn) }
+          )
+        case .googleSignIn:
+          GoogleSignInStep(
+            onContinue: { advance(to: .firstDictation) },
+            onSkip: { advance(to: .firstDictation) }
+          )
+        case .firstDictation:
+          FirstDictationStep(onContinue: { advance(to: .done) })
+        case .done:
+          DoneStep(onFinish: complete)
         }
       }
-      .id(step)  // forces a fresh transition per step
+      .id(step)
       .transition(.asymmetric(
         insertion: .move(edge: .trailing).combined(with: .opacity),
         removal: .move(edge: .leading).combined(with: .opacity)
       ))
       .animation(.spring(duration: 0.45, bounce: 0.2), value: step)
 
+      // Skip button + Step dots overlay
       VStack {
-        // Top-right "Skip" — visible on every step so users don't
-        // feel trapped. Skipping persists `hasCompletedOnboarding`
-        // so the flow doesn't re-present on next launch.
         HStack {
           Spacer()
           Button("Skip", action: complete)
             .buttonStyle(.plain)
             .font(.subheadline.weight(.medium))
-            .foregroundStyle(.white.opacity(0.85))
+            .foregroundStyle(OB.inkSoft)
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .background(Capsule().fill(OB.ink.opacity(0.06)))
             .padding(.top, 18)
             .padding(.trailing, 18)
         }
         Spacer()
-        StepDots(currentStep: step.rawValue, total: OnboardingStep.allCases.count)
+        StepDots(currentStep: step.dotIndex, total: 7)
           .padding(.bottom, 28)
       }
     }
-    .preferredColorScheme(.dark)
     .interactiveDismissDisabled()
   }
 
-  private func advance() {
+  private func advance(to next: OnboardingStep) {
     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-    if let next = OnboardingStep(rawValue: step.rawValue + 1) {
+    withAnimation {
       step = next
-    } else {
-      complete()
     }
   }
 
@@ -102,59 +173,122 @@ struct OnboardingView: View {
 
 // MARK: - Background
 
-/// Purple gradient with a couple of soft "blob" highlights drifting
-/// behind the content to give the screens a living quality without
-/// stealing focus from the foreground copy.
 private struct OnboardingBackground: View {
-  @State private var blobShift = false
-
   var body: some View {
     ZStack {
-      LinearGradient(
-        colors: [
-          Color(red: 0.20, green: 0.08, blue: 0.40),
-          Color(red: 0.40, green: 0.20, blue: 0.65),
-          Color(red: 0.30, green: 0.18, blue: 0.55),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
+      OB.paper.ignoresSafeArea()
+      RadialGradient(
+        colors: [OB.purpleLight, OB.paper],
+        center: .init(x: 0.5, y: 0.25),
+        startRadius: 0,
+        endRadius: 400
       )
       .ignoresSafeArea()
-
-      Circle()
-        .fill(Color.white.opacity(0.10))
-        .frame(width: 320, height: 320)
-        .blur(radius: 80)
-        .offset(x: blobShift ? -120 : 90, y: blobShift ? -180 : -260)
-
-      Circle()
-        .fill(Color.purple.opacity(0.18))
-        .frame(width: 280, height: 280)
-        .blur(radius: 70)
-        .offset(x: blobShift ? 140 : -90, y: blobShift ? 280 : 220)
-    }
-    .onAppear {
-      withAnimation(.easeInOut(duration: 9).repeatForever(autoreverses: true)) {
-        blobShift = true
-      }
     }
   }
 }
 
-// MARK: - Step dots
+// MARK: - Step Dots
 
 private struct StepDots: View {
   let currentStep: Int
   let total: Int
 
   var body: some View {
-    HStack(spacing: 8) {
-      ForEach(0 ..< total, id: \.self) { idx in
+    HStack(spacing: 6) {
+      ForEach(0..<total, id: \.self) { idx in
         Capsule()
-          .fill(idx == currentStep ? Color.white : Color.white.opacity(0.25))
-          .frame(width: idx == currentStep ? 24 : 8, height: 8)
+          .fill(idx == currentStep ? OB.purple : Color.black.opacity(0.15))
+          .frame(width: idx == currentStep ? 22 : 6, height: 6)
           .animation(.spring(duration: 0.4, bounce: 0.3), value: currentStep)
       }
+    }
+  }
+}
+
+// MARK: - Onboarding Button
+
+private enum ButtonVariant {
+  case primary, secondary, ghost, dark
+}
+
+private struct OnboardingButton: View {
+  let label: String
+  var variant: ButtonVariant = .primary
+  var isDisabled: Bool = false
+  var fullWidth: Bool = true
+  let action: () -> Void
+
+  init(
+    _ label: String,
+    variant: ButtonVariant = .primary,
+    isDisabled: Bool = false,
+    fullWidth: Bool = true,
+    action: @escaping () -> Void
+  ) {
+    self.label = label
+    self.variant = variant
+    self.isDisabled = isDisabled
+    self.fullWidth = fullWidth
+    self.action = action
+  }
+
+  var body: some View {
+    Button(action: action) {
+      Text(label)
+        .font(.body.weight(.semibold))
+        .frame(maxWidth: fullWidth ? .infinity : nil)
+        .padding(.vertical, 14)
+        .padding(.horizontal, fullWidth ? 0 : 24)
+        .foregroundStyle(foregroundColor)
+        .background(backgroundShape)
+        .overlay(borderOverlay)
+    }
+    .buttonStyle(.plain)
+    .disabled(isDisabled)
+    .opacity(isDisabled ? 0.5 : 1)
+  }
+
+  private var foregroundColor: Color {
+    switch variant {
+    case .primary, .dark: return .white
+    case .secondary: return OB.ink
+    case .ghost: return OB.inkSoft
+    }
+  }
+
+  @ViewBuilder
+  private var backgroundShape: some View {
+    switch variant {
+    case .primary:
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(LinearGradient(
+          colors: [OB.purple, OB.purpleDark],
+          startPoint: .top,
+          endPoint: .bottom
+        ))
+        .shadow(color: OB.purple.opacity(0.30), radius: 9, y: 6)
+    case .secondary:
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.white)
+        .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
+    case .ghost:
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.clear)
+    case .dark:
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(OB.ink)
+    }
+  }
+
+  @ViewBuilder
+  private var borderOverlay: some View {
+    switch variant {
+    case .secondary:
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .stroke(OB.line, lineWidth: 1)
+    default:
+      EmptyView()
     }
   }
 }
@@ -163,109 +297,77 @@ private struct StepDots: View {
 
 private struct WelcomeStep: View {
   let onContinue: () -> Void
-  @State private var featherOffset: CGFloat = -120
   @State private var featherOpacity: Double = 0
-  @State private var wordmarkOpacity: Double = 0
+  @State private var contentOpacity: Double = 0
 
   var body: some View {
-    VStack(spacing: 24) {
+    VStack(spacing: 16) {
       Spacer()
 
-      // Feather floats in from above.
       Image("Feather")
         .resizable()
         .renderingMode(.template)
         .aspectRatio(contentMode: .fit)
-        .foregroundStyle(.white)
-        .frame(width: 110, height: 110)
-        .shadow(color: .black.opacity(0.3), radius: 8, y: 6)
-        .offset(y: featherOffset)
+        .foregroundStyle(OB.purpleDark)
+        .frame(width: 56, height: 56)
         .opacity(featherOpacity)
-        .onAppear {
-          withAnimation(.spring(duration: 1.2, bounce: 0.35)) {
-            featherOffset = 0
-            featherOpacity = 1
-          }
-          withAnimation(.easeIn(duration: 0.4).delay(0.6)) {
-            wordmarkOpacity = 1
-          }
-        }
 
       VStack(spacing: 8) {
-        Text("Welcome to Quill")
-          .font(.system(size: 36, weight: .bold, design: .serif))
-          .foregroundStyle(.white)
-        Text("Voice notes that think with you.")
-          .font(.title3)
-          .foregroundStyle(.white.opacity(0.85))
+        (Text("Welcome to\n")
+          .font(.system(size: 38, weight: .medium, design: .serif))
+          .foregroundStyle(OB.ink)
+        + Text("Quill")
+          .font(.system(size: 38, weight: .regular, design: .serif).italic())
+          .foregroundStyle(OB.purpleDark)
+        + Text(".")
+          .font(.system(size: 38, weight: .medium, design: .serif))
+          .foregroundStyle(OB.ink))
           .multilineTextAlignment(.center)
+          .lineSpacing(2)
+
+        Text("Voice-first AI in your pocket.\nSpeak. Edit. Act.")
+          .font(.subheadline)
+          .foregroundStyle(OB.inkSoft)
+          .multilineTextAlignment(.center)
+          .lineSpacing(2)
       }
-      .opacity(wordmarkOpacity)
-      .padding(.horizontal, 32)
+      .opacity(contentOpacity)
 
       Spacer()
 
-      OnboardingButton("Let's set things up", action: onContinue)
-        .opacity(wordmarkOpacity)
-        .padding(.horizontal, 24)
-        .padding(.bottom, 80)
-    }
-  }
-}
-
-// MARK: - Step 2: Permissions
-
-private struct PermissionsStep: View {
-  let onContinue: () -> Void
-  @StateObject private var permissions = OnboardingPermissions()
-
-  var body: some View {
-    VStack(spacing: 18) {
-      stepHeader(
-        title: "Quick permissions",
-        subtitle: "Quill records on-device. Nothing leaves your phone unless you connect AI."
-      )
-
-      Spacer().frame(height: 12)
-
-      PermissionRow(
-        title: "Microphone",
-        subtitle: "Required — capture your voice.",
-        systemImage: "mic.fill",
-        state: permissions.micState,
-        action: { permissions.requestMic() }
-      )
-      PermissionRow(
-        title: "Speech Recognition",
-        subtitle: "Optional — see your words live as you speak.",
-        systemImage: "waveform",
-        state: permissions.speechState,
-        action: { permissions.requestSpeech() }
-      )
-
-      Spacer()
-
-      OnboardingButton(
-        permissions.canContinue ? "Continue" : "Grant permissions to continue",
-        isPrimary: permissions.canContinue,
-        isDisabled: !permissions.canContinue,
-        action: onContinue
-      )
+      VStack(spacing: 8) {
+        OnboardingButton("Get started", action: onContinue)
+        OnboardingButton("I already have an account", variant: .ghost, action: onContinue)
+      }
+      .opacity(contentOpacity)
       .padding(.horizontal, 24)
-      .padding(.bottom, 80)
+
+      Text("~90 seconds")
+        .font(.caption2)
+        .foregroundStyle(OB.inkMute)
+        .padding(.bottom, 60)
+        .opacity(contentOpacity)
     }
-    .padding(.horizontal, 24)
+    .padding(.horizontal, 22)
+    .onAppear {
+      withAnimation(.easeOut(duration: 0.8)) {
+        featherOpacity = 1
+      }
+      withAnimation(.easeIn(duration: 0.5).delay(0.4)) {
+        contentOpacity = 1
+      }
+    }
   }
 }
+
+// MARK: - Permissions Model
 
 @MainActor
 private final class OnboardingPermissions: ObservableObject {
-  enum State { case pending, requesting, granted, denied }
-  @Published var micState: State = .pending
-  @Published var speechState: State = .pending
+  enum PermState { case pending, requesting, granted, denied }
+  @Published var micState: PermState = .pending
+  @Published var speechState: PermState = .pending
 
-  /// Mic is required; speech is optional (user can skip via the
-  /// "Continue" button once mic is granted).
   var canContinue: Bool { micState == .granted }
 
   init() {
@@ -294,33 +396,48 @@ private final class OnboardingPermissions: ObservableObject {
   }
 }
 
+// MARK: - Permission Row
+
 private struct PermissionRow: View {
   let title: String
   let subtitle: String
   let systemImage: String
-  let state: OnboardingPermissions.State
+  let state: OnboardingPermissions.PermState
   let action: () -> Void
 
   var body: some View {
     Button(action: action) {
-      HStack(alignment: .center, spacing: 14) {
-        Image(systemName: systemImage)
-          .font(.title3.weight(.semibold))
-          .foregroundStyle(.white)
-          .frame(width: 36, height: 36)
-          .background(Circle().fill(Color.white.opacity(0.18)))
+      HStack(alignment: .center, spacing: 12) {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+          .fill(OB.purpleLight)
+          .frame(width: 32, height: 32)
+          .overlay(
+            Image(systemName: systemImage)
+              .font(.system(size: 14, weight: .semibold))
+              .foregroundStyle(OB.purpleDark)
+          )
 
         VStack(alignment: .leading, spacing: 2) {
-          Text(title).font(.body.weight(.semibold)).foregroundStyle(.white)
-          Text(subtitle).font(.caption).foregroundStyle(.white.opacity(0.75))
+          Text(title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(OB.ink)
+          Text(subtitle)
+            .font(.caption)
+            .foregroundStyle(OB.inkMute)
         }
+
         Spacer()
         statusGlyph
       }
-      .padding(14)
+      .padding(12)
+      .padding(.horizontal, 2)
       .background(
-        RoundedRectangle(cornerRadius: 14, style: .continuous)
-          .fill(Color.white.opacity(state == .granted ? 0.20 : 0.08))
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(Color.white)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .stroke(OB.line, lineWidth: 1)
       )
     }
     .buttonStyle(.plain)
@@ -331,105 +448,628 @@ private struct PermissionRow: View {
   private var statusGlyph: some View {
     switch state {
     case .pending:
-      Image(systemName: "circle")
-        .foregroundStyle(.white.opacity(0.5))
+      Text("Grant")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(OB.ink)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+          RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.white)
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .stroke(OB.line, lineWidth: 1)
+        )
     case .requesting:
-      ProgressView().controlSize(.small).tint(.white)
+      ProgressView()
+        .controlSize(.small)
+        .tint(OB.purple)
     case .granted:
       Image(systemName: "checkmark.circle.fill")
-        .foregroundStyle(.green)
+        .foregroundStyle(OB.proGreen)
+        .font(.title3)
         .symbolEffect(.bounce, value: state)
     case .denied:
       Image(systemName: "exclamationmark.circle.fill")
         .foregroundStyle(.orange)
+        .font(.title3)
     }
   }
 }
 
-// MARK: - Step 3: AI key
+// MARK: - Step 2: Permissions
 
-private struct AIKeyStep: View {
+private struct PermissionsStep: View {
   let onContinue: () -> Void
-  let onSkip: () -> Void
-
-  @AppStorage(QuillIOSSettingsKey.aiProvider) private var providerRaw: String = QuillIOSSettingsKey.defaultProvider
-  @State private var apiKey: String = ""
-  @State private var savedFlash = false
-
-  private var provider: AIProvider {
-    AIProvider(rawValue: providerRaw) ?? .anthropic
-  }
+  @StateObject private var permissions = OnboardingPermissions()
 
   var body: some View {
-    VStack(spacing: 16) {
-      stepHeader(
-        title: "Connect AI (optional)",
-        subtitle: "Adds Email / Notes / Clean modes that polish your dictations. You can always do this later."
-      )
-
-      Picker("Provider", selection: $providerRaw) {
-        Text("Anthropic").tag(AIProvider.anthropic.rawValue)
-        Text("OpenAI").tag(AIProvider.openAI.rawValue)
-      }
-      .pickerStyle(.segmented)
-      .colorScheme(.dark)
-      .padding(.top, 8)
-
+    VStack(alignment: .leading, spacing: 0) {
       VStack(alignment: .leading, spacing: 6) {
-        Text(provider == .anthropic ? "Get a key at console.anthropic.com" : "Get a key at platform.openai.com")
-          .font(.caption)
-          .foregroundStyle(.white.opacity(0.75))
-        SecureField("API key", text: $apiKey)
-          .textInputAutocapitalization(.never)
-          .autocorrectionDisabled()
-          .padding(12)
-          .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
-          .foregroundStyle(.white)
+        Text("Grant access")
+          .font(.system(size: 26, weight: .medium, design: .serif))
+          .foregroundStyle(OB.ink)
+        Text("Quill never records without you holding the button.")
+          .font(.subheadline)
+          .foregroundStyle(OB.inkSoft)
       }
+      .padding(.top, 72)
 
-      if savedFlash {
-        Label("Saved to Keychain", systemImage: "checkmark.circle.fill")
-          .foregroundStyle(.green)
-          .font(.caption)
-          .transition(.opacity.combined(with: .move(edge: .bottom)))
+      VStack(spacing: 8) {
+        PermissionRow(
+          title: "Microphone",
+          subtitle: "Hear what you say.",
+          systemImage: "mic.fill",
+          state: permissions.micState,
+          action: { permissions.requestMic() }
+        )
+        PermissionRow(
+          title: "Speech Recognition",
+          subtitle: "On-device transcription.",
+          systemImage: "waveform",
+          state: permissions.speechState,
+          action: { permissions.requestSpeech() }
+        )
       }
+      .padding(.top, 18)
 
       Spacer()
 
-      VStack(spacing: 10) {
-        OnboardingButton("Save & continue", isDisabled: apiKey.isEmpty, action: saveAndContinue)
-        Button("I'll add it later", action: onSkip)
-          .font(.subheadline)
-          .foregroundStyle(.white.opacity(0.85))
-      }
-      .padding(.horizontal, 24)
-      .padding(.bottom, 80)
+      OnboardingButton(
+        "Continue",
+        isDisabled: !permissions.canContinue,
+        action: onContinue
+      )
+      .padding(.bottom, 60)
     }
-    .padding(.horizontal, 24)
+    .padding(.horizontal, 22)
+  }
+}
+
+// MARK: - Step 3: Plan Choice
+
+private struct PlanChoiceStep: View {
+  let onProTrial: () -> Void
+  let onBYOK: () -> Void
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 6) {
+          (Text("How will you ")
+            .font(.system(size: 24, weight: .medium, design: .serif))
+            .foregroundStyle(OB.ink)
+          + Text("pay for AI?")
+            .font(.system(size: 24, weight: .medium, design: .serif).italic())
+            .foregroundStyle(OB.purpleDark))
+          Text("Two ways. You can switch later.")
+            .font(.subheadline)
+            .foregroundStyle(OB.inkSoft)
+        }
+        .padding(.top, 72)
+
+        // Pro card
+        VStack(alignment: .leading, spacing: 6) {
+          HStack {
+            PipView("Recommended", tone: .dark)
+            Spacer()
+            Text("10-day free trial")
+              .font(.caption2.weight(.semibold))
+              .foregroundStyle(OB.purpleDark)
+          }
+
+          Text("Quill Pro")
+            .font(.system(size: 19, weight: .medium, design: .serif))
+            .foregroundStyle(OB.ink)
+
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("$10")
+              .font(.system(size: 28, weight: .medium, design: .serif))
+              .foregroundStyle(OB.purpleDark)
+            Text("/ month")
+              .font(.caption)
+              .foregroundStyle(OB.inkMute)
+          }
+
+          VStack(alignment: .leading, spacing: 3) {
+            ProConRow(text: "Zero setup, works immediately", isPro: true)
+            ProConRow(text: "Cross-device sync & 3rd-party actions", isPro: true)
+            ProConRow(text: "Monthly subscription", isPro: false)
+          }
+          .padding(.top, 2)
+        }
+        .padding(16)
+        .background(
+          LinearGradient(
+            colors: [.white, OB.purpleLight],
+            startPoint: .top,
+            endPoint: .bottom
+          )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(OB.purpleMid, lineWidth: 1.5)
+        )
+        .shadow(color: OB.purple.opacity(0.15), radius: 12, y: 8)
+        .padding(.top, 16)
+
+        // BYOK card
+        VStack(alignment: .leading, spacing: 6) {
+          HStack {
+            PipView("One-time", tone: .grey)
+            Spacer()
+            Text("Power users")
+              .font(.caption2)
+              .foregroundStyle(OB.inkMute)
+          }
+
+          Text("Bring Your Own Keys")
+            .font(.system(size: 19, weight: .medium, design: .serif))
+            .foregroundStyle(OB.ink)
+
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("$50")
+              .font(.system(size: 28, weight: .medium, design: .serif))
+              .foregroundStyle(OB.ink)
+            Text("once \u{00B7} forever")
+              .font(.caption)
+              .foregroundStyle(OB.inkMute)
+          }
+
+          VStack(alignment: .leading, spacing: 3) {
+            ProConRow(text: "Pay providers directly (pennies/mo)", isPro: true)
+            ProConRow(text: "Choose Claude or GPT-4o", isPro: true)
+            ProConRow(text: "2 min of setup, no cross-device sync", isPro: false)
+            ProConRow(text: "Apple-only actions (no Gmail, Linear...)", isPro: false)
+          }
+          .padding(.top, 2)
+        }
+        .padding(16)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(OB.line, lineWidth: 1)
+        )
+        .padding(.top, 10)
+
+        VStack(spacing: 8) {
+          OnboardingButton("Start free trial", action: onProTrial)
+          OnboardingButton("Use my own keys", variant: .ghost, action: onBYOK)
+        }
+        .padding(.top, 16)
+        .padding(.bottom, 60)
+      }
+      .padding(.horizontal, 22)
+    }
+    .scrollIndicators(.hidden)
+  }
+}
+
+private struct ProConRow: View {
+  let text: String
+  let isPro: Bool
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 8) {
+      Text(isPro ? "+" : "\u{2212}")
+        .font(.caption.weight(.bold))
+        .foregroundStyle(isPro ? OB.proGreen : OB.conRed)
+        .frame(width: 12, alignment: .center)
+      Text(text)
+        .font(.caption)
+        .foregroundStyle(OB.inkSoft)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+}
+
+private enum PipTone {
+  case purple, green, grey, dark
+}
+
+private struct PipView: View {
+  let text: String
+  let tone: PipTone
+
+  init(_ text: String, tone: PipTone = .purple) {
+    self.text = text
+    self.tone = tone
+  }
+
+  private var bg: Color {
+    switch tone {
+    case .purple: return OB.purpleLight
+    case .green: return Color(red: 0.906, green: 0.969, blue: 0.922)
+    case .grey: return OB.paperElev
+    case .dark: return OB.ink
+    }
+  }
+
+  private var fg: Color {
+    switch tone {
+    case .purple: return OB.purpleDark
+    case .green: return OB.proGreen
+    case .grey: return OB.inkSoft
+    case .dark: return .white
+    }
+  }
+
+  var body: some View {
+    Text(text)
+      .font(.system(size: 10, weight: .bold))
+      .tracking(0.6)
+      .textCase(.uppercase)
+      .foregroundStyle(fg)
+      .padding(.horizontal, 9)
+      .padding(.vertical, 3)
+      .background(Capsule().fill(bg))
+  }
+}
+
+// MARK: - Step 4a: Pro Trial
+
+private struct ProTrialStep: View {
+  let onContinue: () -> Void
+  let onSwitchBYOK: () -> Void
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 6) {
+          (Text("Start your ")
+            .font(.system(size: 24, weight: .medium, design: .serif))
+            .foregroundStyle(OB.ink)
+          + Text("10-day trial")
+            .font(.system(size: 24, weight: .medium, design: .serif).italic())
+            .foregroundStyle(OB.purpleDark))
+          Text("Cancel anytime. No charge if you stop before day 10.")
+            .font(.subheadline)
+            .foregroundStyle(OB.inkSoft)
+        }
+        .padding(.top, 72)
+
+        // Price + timeline card
+        VStack(alignment: .leading, spacing: 12) {
+          HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+              Text("$10")
+                .font(.system(size: 30, weight: .medium, design: .serif))
+                .foregroundStyle(OB.purpleDark)
+              Text("/mo")
+                .font(.subheadline)
+                .foregroundStyle(OB.inkMute)
+            }
+            Spacer()
+            PipView("10 days free", tone: .purple)
+          }
+
+          Divider()
+            .overlay(OB.line)
+
+          VStack(spacing: 8) {
+            TimelineRow(date: "Today", event: "Free trial starts")
+            TimelineRow(date: "Day 8", event: "Reminder email")
+            TimelineRow(date: "Day 10", event: "Your card is charged $10")
+          }
+        }
+        .padding(16)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(OB.line, lineWidth: 1)
+        )
+        .padding(.top, 16)
+
+        // Apple pay info note
+        HStack(alignment: .top, spacing: 10) {
+          Image(systemName: "apple.logo")
+            .font(.caption)
+            .foregroundStyle(OB.inkSoft)
+          Text("Pay via Apple \u{2014} uses your iCloud payment method.")
+            .font(.caption)
+            .foregroundStyle(OB.inkSoft)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(OB.purpleLight)
+        )
+        .padding(.top, 12)
+
+        // Beta note
+        HStack(alignment: .top, spacing: 10) {
+          Image(systemName: "hammer.fill")
+            .font(.caption)
+            .foregroundStyle(OB.inkMute)
+          Text("Payment coming soon. Quill will run in BYOK mode during the beta.")
+            .font(.caption)
+            .foregroundStyle(OB.inkMute)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(OB.paperElev)
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(OB.line, lineWidth: 1)
+        )
+        .padding(.top, 8)
+
+        VStack(spacing: 8) {
+          OnboardingButton("Subscribe with Apple", action: onContinue)
+          OnboardingButton("Use my own keys instead", variant: .ghost, action: onSwitchBYOK)
+        }
+        .padding(.top, 20)
+        .padding(.bottom, 60)
+      }
+      .padding(.horizontal, 22)
+    }
+    .scrollIndicators(.hidden)
+  }
+}
+
+private struct TimelineRow: View {
+  let date: String
+  let event: String
+
+  var body: some View {
+    HStack {
+      Text(date)
+        .font(.caption)
+        .foregroundStyle(OB.inkMute)
+        .frame(width: 60, alignment: .leading)
+      Spacer()
+      Text(event)
+        .font(.caption.weight(.medium))
+        .foregroundStyle(OB.ink)
+    }
+  }
+}
+
+// MARK: - Step 4b: BYOK Phone (Consolidated)
+
+private struct BYOKPhoneStep: View {
+  @Binding var selectedProvider: AIProvider
+  let onContinue: () -> Void
+
+  @State private var apiKey: String = ""
+  @State private var savedFlash = false
+  @State private var isVerifying = false
+  @State private var errorMessage: String?
+
+  private var hostURL: String {
+    selectedProvider == .anthropic
+      ? "console.anthropic.com"
+      : "platform.openai.com"
+  }
+
+  private var keyPrefix: String {
+    selectedProvider == .anthropic ? "sk-ant-api03-..." : "sk-proj-..."
+  }
+
+  private var steps: [(Int, String, String)] {
+    switch selectedProvider {
+    case .anthropic:
+      return [
+        (1, "Tap to open Anthropic", "Sign in or create an account"),
+        (2, "Create an API key", "Starts with sk-ant-api03-"),
+        (3, "Long-press to copy", "Then come back here"),
+      ]
+    case .openAI:
+      return [
+        (1, "Tap to open OpenAI", "Sign in or create an account"),
+        (2, "Create an API key", "Starts with sk-proj-"),
+        (3, "Long-press to copy", "Then come back here"),
+      ]
+    }
+  }
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 0) {
+        // Header
+        HStack(spacing: 10) {
+          Text("BYOK")
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.6)
+            .textCase(.uppercase)
+            .foregroundStyle(OB.inkMute)
+        }
+        .padding(.top, 72)
+
+        Text("Set up your key")
+          .font(.system(size: 22, weight: .medium, design: .serif))
+          .foregroundStyle(OB.ink)
+          .padding(.top, 8)
+
+        Text("Pick a provider, paste your key.")
+          .font(.subheadline)
+          .foregroundStyle(OB.inkSoft)
+          .padding(.top, 4)
+
+        // Segmented control
+        Picker("Provider", selection: Binding(
+          get: { selectedProvider.rawValue },
+          set: { selectedProvider = AIProvider(rawValue: $0) ?? .anthropic }
+        )) {
+          HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 4)
+              .fill(Color(red: 0.80, green: 0.47, blue: 0.36))
+              .frame(width: 14, height: 14)
+              .overlay(
+                Text("A")
+                  .font(.system(size: 8, weight: .bold, design: .serif))
+                  .foregroundStyle(.white)
+              )
+            Text("Anthropic")
+          }
+          .tag(AIProvider.anthropic.rawValue)
+
+          HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 4)
+              .fill(Color(red: 0.063, green: 0.639, blue: 0.498))
+              .frame(width: 14, height: 14)
+              .overlay(
+                Text("O")
+                  .font(.system(size: 8, weight: .bold, design: .serif))
+                  .foregroundStyle(.white)
+              )
+            Text("OpenAI")
+          }
+          .tag(AIProvider.openAI.rawValue)
+        }
+        .pickerStyle(.segmented)
+        .padding(.top, 12)
+
+        // Steps card
+        VStack(spacing: 10) {
+          ForEach(steps, id: \.0) { step in
+            HStack(alignment: .top, spacing: 10) {
+              Text("\(step.0)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(OB.purple))
+
+              VStack(alignment: .leading, spacing: 1) {
+                Text(step.1)
+                  .font(.subheadline.weight(.semibold))
+                  .foregroundStyle(OB.ink)
+                Text(step.2)
+                  .font(.caption)
+                  .foregroundStyle(OB.inkMute)
+              }
+            }
+          }
+        }
+        .padding(14)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(OB.line, lineWidth: 1)
+        )
+        .padding(.top, 12)
+
+        // Open host button
+        OnboardingButton("Open \(hostURL)", variant: .dark) {
+          if let url = URL(string: "https://\(hostURL)") {
+            UIApplication.shared.open(url)
+          }
+        }
+        .padding(.top, 10)
+
+        // Paste key
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Paste key here")
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(0.4)
+            .textCase(.uppercase)
+            .foregroundStyle(OB.inkMute)
+
+          SecureField(keyPrefix, text: $apiKey)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .font(.system(.subheadline, design: .monospaced))
+            .padding(12)
+            .background(
+              RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white)
+            )
+            .overlay(
+              RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(OB.purple, lineWidth: 1.5)
+            )
+        }
+        .padding(.top, 12)
+
+        if let errorMessage {
+          Text(errorMessage)
+            .font(.caption)
+            .foregroundStyle(OB.conRed)
+            .padding(.top, 6)
+        }
+
+        if savedFlash {
+          Label("Saved to Keychain", systemImage: "checkmark.circle.fill")
+            .foregroundStyle(OB.proGreen)
+            .font(.caption.weight(.medium))
+            .padding(.top, 6)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+
+        // Warning
+        HStack(alignment: .top, spacing: 8) {
+          Image(systemName: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(Color(red: 0.85, green: 0.60, blue: 0.10))
+          Text("BYOK keys live on this device only \u{2014} no Mac\u{2194}iPhone sync, and actions are limited to Apple apps.")
+            .font(.caption)
+            .foregroundStyle(OB.inkSoft)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color(red: 1.0, green: 0.96, blue: 0.90))
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Color(red: 0.99, green: 0.89, blue: 0.75), lineWidth: 1)
+        )
+        .padding(.top, 10)
+
+        OnboardingButton(
+          isVerifying ? "Verifying..." : "Verify & finish",
+          isDisabled: apiKey.isEmpty || isVerifying,
+          action: saveAndContinue
+        )
+        .padding(.top, 16)
+        .padding(.bottom, 60)
+      }
+      .padding(.horizontal, 22)
+    }
+    .scrollIndicators(.hidden)
   }
 
   private func saveAndContinue() {
+    errorMessage = nil
+    isVerifying = true
+
     let account: String
-    switch provider {
+    switch selectedProvider {
     case .anthropic: account = KeychainKey.anthropicAPIKey
-    case .openAI:    account = KeychainKey.openAIAPIKey
+    case .openAI: account = KeychainKey.openAIAPIKey
     }
+
     let status = KeychainStore.save(account: account, value: apiKey)
     if status == errSecSuccess {
       withAnimation { savedFlash = true }
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+        isVerifying = false
         onContinue()
       }
     } else {
-      // Soft fall-through: even on save error, keep moving so the
-      // user isn't trapped here. They'll see the missing-key error
-      // when they first try AI.
-      onContinue()
+      isVerifying = false
+      errorMessage = "Failed to save key (status \(status)). Continuing anyway."
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        onContinue()
+      }
     }
   }
 }
 
-// MARK: - Step 4: Google sign-in
+// MARK: - Step 5: Google Sign-In
 
 private struct GoogleSignInStep: View {
   let onContinue: () -> Void
@@ -439,70 +1079,76 @@ private struct GoogleSignInStep: View {
   @State private var connectedEmail: String?
   @State private var errorMessage: String?
 
-  /// Mirror of the integration-connection set so successful sign-in here
-  /// flips Gmail + Google Calendar to "Connected" in the IntegrationsView
-  /// without requiring the user to re-toggle them.
   @AppStorage(IntegrationConnectionStore.userDefaultsKey)
   private var connectedData: Data = Data()
 
   var body: some View {
-    VStack(spacing: 16) {
-      stepHeader(
-        title: "Connect Google (optional)",
-        subtitle: "Lets you say \"email Mike about the deck\" or \"add a meeting to my Google Calendar\" — Quill drafts the email or creates the event for you. You can do this later from Settings."
-      )
+    VStack(alignment: .leading, spacing: 0) {
+      VStack(alignment: .leading, spacing: 6) {
+        Text("Connect Google")
+          .font(.system(size: 26, weight: .medium, design: .serif))
+          .foregroundStyle(OB.ink)
+        Text("Say \"email Mike about the deck\" or \"add a meeting\" \u{2014} Quill drafts it for you. You can do this later in Settings.")
+          .font(.subheadline)
+          .foregroundStyle(OB.inkSoft)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      .padding(.top, 72)
 
-      Spacer().frame(height: 8)
+      Spacer().frame(height: 24)
 
-      // Same hydration pattern as the macOS sibling: prefer the cached
-      // email so a returning user sees connected state immediately,
-      // fall back to a userinfo fetch only if cache is empty.
       if let connectedEmail {
-        VStack(spacing: 6) {
-          Label {
-            Text("Connected as \(connectedEmail)")
-              .font(.subheadline.weight(.semibold))
-              .foregroundStyle(.white)
-          } icon: {
-            Image(systemName: "checkmark.circle.fill")
-              .foregroundStyle(.green)
-          }
+        VStack(spacing: 8) {
+          Image(systemName: "checkmark.circle.fill")
+            .font(.title)
+            .foregroundStyle(OB.proGreen)
+          Text("Connected as \(connectedEmail)")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(OB.ink)
           Text("Gmail drafts and Google Calendar events are now available in Action mode.")
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.75))
+            .foregroundStyle(OB.inkSoft)
             .multilineTextAlignment(.center)
         }
-        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity)
+        .padding(16)
+        .background(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color.white)
+        )
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(OB.line, lineWidth: 1)
+        )
         .transition(.opacity)
       }
 
       if let errorMessage {
         Text(errorMessage)
           .font(.caption)
-          .foregroundStyle(.orange)
+          .foregroundStyle(OB.conRed)
           .multilineTextAlignment(.center)
+          .frame(maxWidth: .infinity)
+          .padding(.top, 12)
       }
 
       Spacer()
 
-      VStack(spacing: 10) {
+      VStack(spacing: 8) {
         if connectedEmail != nil {
           OnboardingButton("Continue", action: onContinue)
         } else {
           OnboardingButton(
-            isAuthenticating ? "Opening Safari…" : "Sign in with Google",
+            isAuthenticating ? "Opening Safari..." : "Sign in with Google",
             isDisabled: isAuthenticating,
             action: signIn
           )
-          Button("I'll add it later", action: onSkip)
-            .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.85))
+          OnboardingButton("I'll add it later", variant: .ghost, action: onSkip)
         }
       }
-      .padding(.horizontal, 24)
-      .padding(.bottom, 80)
+      .padding(.bottom, 60)
     }
-    .padding(.horizontal, 24)
+    .padding(.horizontal, 22)
     .task {
       if let cached = UserDefaults.standard.string(forKey: IOSGoogleOAuthClient.googleAccountEmailDefaultsKey) {
         connectedEmail = cached
@@ -515,14 +1161,10 @@ private struct GoogleSignInStep: View {
   private func signIn() {
     isAuthenticating = true
     errorMessage = nil
-
     Task {
       do {
         _ = try await IOSGoogleOAuthClient.authorize()
         let email = await IOSGoogleOAuthClient.fetchUserEmail()
-        // Single sign-in connects both Google services — mirror the
-        // macOS GoogleOAuthSheet behavior so IntegrationsView and the
-        // Action confirmation dropdown reflect reality.
         var current = IntegrationConnectionStore.decode(connectedData)
         current.insert(.gmail)
         current.insert(.googleCalendar)
@@ -536,111 +1178,235 @@ private struct GoogleSignInStep: View {
   }
 }
 
-// MARK: - Step 5: First note
+// MARK: - Step 6: First Dictation
 
-private struct FirstNoteStep: View {
-  let onFinish: () -> Void
-  @State private var burst = false
+private struct FirstDictationStep: View {
+  let onContinue: () -> Void
+  @State private var barHeights: [CGFloat] = (0..<20).map { _ in CGFloat.random(in: 4...18) }
 
   var body: some View {
-    VStack(spacing: 18) {
-      stepHeader(
-        title: "You're all set",
-        subtitle: "Tap the feather mic anywhere to dictate. Photos, AI cleanup, and shareable PDFs are waiting."
+    VStack(spacing: 0) {
+      VStack(alignment: .leading, spacing: 6) {
+        (Text("Press & hold to ")
+          .font(.system(size: 24, weight: .medium, design: .serif))
+          .foregroundStyle(OB.ink)
+        + Text("speak")
+          .font(.system(size: 24, weight: .medium, design: .serif).italic())
+          .foregroundStyle(OB.purpleDark))
+        Text("Hold the mic, talk, release. We'll show you the text.")
+          .font(.subheadline)
+          .foregroundStyle(OB.inkSoft)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.top, 72)
+      .padding(.horizontal, 22)
+
+      Spacer().frame(height: 24)
+
+      // Dark HUD mock
+      VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 8) {
+          Circle()
+            .fill(Color.red)
+            .frame(width: 7, height: 7)
+            .shadow(color: .red.opacity(0.7), radius: 5)
+          Text("00:02")
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.6))
+          Spacer()
+          Text("Listening")
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.7))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+              RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(.white.opacity(0.06))
+            )
+        }
+        .padding(.bottom, 12)
+
+        HStack(spacing: 0) {
+          Text("\u{201C}hi mom calling to say hi\u{201D}")
+            .font(.system(size: 15, weight: .regular, design: .serif).italic())
+            .foregroundStyle(.white)
+          Rectangle()
+            .fill(OB.purpleMid)
+            .frame(width: 2, height: 14)
+            .padding(.leading, 2)
+        }
+        .padding(.bottom, 14)
+
+        // Waveform bars
+        HStack(spacing: 2) {
+          ForEach(0..<20, id: \.self) { i in
+            RoundedRectangle(cornerRadius: 1.5)
+              .fill(OB.purpleMid)
+              .frame(width: 2.5, height: barHeights[i])
+          }
+        }
+        .frame(height: 18, alignment: .bottom)
+      }
+      .padding(18)
+      .background(
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+          .fill(
+            LinearGradient(
+              colors: [OB.ink, Color(red: 0.086, green: 0.086, blue: 0.094)],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+          )
+          .shadow(color: OB.purple.opacity(0.30), radius: 22, y: 18)
       )
+      .padding(.horizontal, 22)
 
       Spacer()
 
-      // Confetti-ish burst around a celebratory feather.
+      // Big mic button (visual only)
       ZStack {
-        ForEach(0 ..< 14) { i in
-          Circle()
-            .fill(Color.white.opacity(0.6))
-            .frame(width: 6, height: 6)
-            .offset(burstOffset(for: i))
-            .opacity(burst ? 0 : 1)
-            .animation(.easeOut(duration: 1.2).delay(Double(i) * 0.02), value: burst)
-        }
-        Image("Feather")
-          .resizable()
-          .renderingMode(.template)
-          .aspectRatio(contentMode: .fit)
-          .foregroundStyle(.white)
-          .frame(width: 96, height: 96)
-          .shadow(color: .black.opacity(0.3), radius: 8, y: 6)
-          .scaleEffect(burst ? 1 : 0.6)
-          .animation(.spring(duration: 0.7, bounce: 0.45), value: burst)
+        Circle()
+          .stroke(OB.purpleMid.opacity(0.4), lineWidth: 2)
+          .frame(width: 92, height: 92)
+
+        Circle()
+          .fill(
+            LinearGradient(
+              colors: [OB.purpleMid, OB.purpleDark],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+          )
+          .frame(width: 76, height: 76)
+          .shadow(color: OB.purple.opacity(0.40), radius: 14, y: 10)
+          .overlay(
+            Image(systemName: "mic.fill")
+              .font(.system(size: 30))
+              .foregroundStyle(.white)
+          )
       }
 
       Spacer()
 
-      OnboardingButton("Start using Quill", action: onFinish)
-        .padding(.horizontal, 24)
-        .padding(.bottom, 80)
+      OnboardingButton("Continue", action: onContinue)
+        .padding(.horizontal, 22)
+        .padding(.bottom, 60)
     }
-    .padding(.horizontal, 24)
     .onAppear {
-      withAnimation { burst = true }
+      // Animate waveform bars
+      withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+        barHeights = (0..<20).map { _ in CGFloat.random(in: 4...18) }
+      }
     }
   }
-
-  /// Pseudo-random offsets for the confetti dots.
-  private func burstOffset(for index: Int) -> CGSize {
-    let angle = Double(index) / 14 * 2 * .pi
-    let radius: CGFloat = burst ? 110 : 0
-    return CGSize(width: cos(angle) * radius, height: sin(angle) * radius)
-  }
 }
 
-// MARK: - Shared step header / button
+// MARK: - Step 7: Done
 
-@ViewBuilder
-private func stepHeader(title: String, subtitle: String) -> some View {
-  VStack(spacing: 10) {
-    Spacer().frame(height: 24)
-    Text(title)
-      .font(.system(size: 28, weight: .bold, design: .serif))
-      .foregroundStyle(.white)
-      .multilineTextAlignment(.center)
-    Text(subtitle)
-      .font(.subheadline)
-      .foregroundStyle(.white.opacity(0.85))
-      .multilineTextAlignment(.center)
-      .frame(maxWidth: 360)
-  }
-  .padding(.horizontal, 24)
-}
-
-private struct OnboardingButton: View {
-  let label: String
-  var isPrimary: Bool = true
-  var isDisabled: Bool = false
-  let action: () -> Void
-
-  init(_ label: String, isPrimary: Bool = true, isDisabled: Bool = false, action: @escaping () -> Void) {
-    self.label = label
-    self.isPrimary = isPrimary
-    self.isDisabled = isDisabled
-    self.action = action
-  }
+private struct DoneStep: View {
+  let onFinish: () -> Void
+  @State private var appeared = false
 
   var body: some View {
-    Button(action: action) {
-      Text(label)
-        .font(.body.weight(.semibold))
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 14)
-        .foregroundStyle(isPrimary ? Color(red: 0.30, green: 0.18, blue: 0.55) : .white)
-        .background(
-          RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(isPrimary ? Color.white : Color.white.opacity(0.15))
+    VStack(spacing: 14) {
+      Spacer()
+
+      // Feather with decorative ring
+      ZStack {
+        Circle()
+          .stroke(OB.purpleMid.opacity(0.4), lineWidth: 2)
+          .frame(width: 92, height: 92)
+
+        Image("Feather")
+          .resizable()
+          .renderingMode(.template)
+          .aspectRatio(contentMode: .fit)
+          .foregroundStyle(OB.purpleDark)
+          .frame(width: 64, height: 64)
+      }
+      .scaleEffect(appeared ? 1 : 0.7)
+      .opacity(appeared ? 1 : 0)
+
+      (Text("You're ")
+        .font(.system(size: 36, weight: .medium, design: .serif))
+        .foregroundStyle(OB.ink)
+      + Text("set")
+        .font(.system(size: 36, weight: .regular, design: .serif).italic())
+        .foregroundStyle(OB.purpleDark)
+      + Text(".")
+        .font(.system(size: 36, weight: .medium, design: .serif))
+        .foregroundStyle(OB.ink))
+      .opacity(appeared ? 1 : 0)
+
+      Text("Tap the big purple button anywhere in Quill to dictate.")
+        .font(.subheadline)
+        .foregroundStyle(OB.inkSoft)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 260)
+        .opacity(appeared ? 1 : 0)
+
+      // Try cards
+      VStack(spacing: 8) {
+        TryCard(
+          title: "Try Dictation",
+          subtitle: "Hold the mic, say anything"
         )
+        TryCard(
+          title: "Try Actions",
+          subtitle: "\"Remind me to call mom Friday\""
+        )
+      }
+      .padding(.top, 12)
+      .opacity(appeared ? 1 : 0)
+
+      Spacer()
+
+      OnboardingButton("Open Quill", action: onFinish)
+        .padding(.horizontal, 22)
+        .padding(.bottom, 60)
+        .opacity(appeared ? 1 : 0)
     }
-    .buttonStyle(.plain)
-    .disabled(isDisabled)
-    .opacity(isDisabled ? 0.5 : 1)
+    .padding(.horizontal, 22)
+    .onAppear {
+      withAnimation(.spring(duration: 0.7, bounce: 0.3)) {
+        appeared = true
+      }
+    }
   }
 }
+
+private struct TryCard: View {
+  let title: String
+  let subtitle: String
+
+  var body: some View {
+    HStack {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(OB.ink)
+        Text(subtitle)
+          .font(.caption)
+          .foregroundStyle(OB.inkMute)
+      }
+      Spacer()
+      Image(systemName: "chevron.right")
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(OB.inkMute)
+    }
+    .padding(14)
+    .background(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(Color.white)
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .stroke(OB.line, lineWidth: 1)
+    )
+  }
+}
+
+// MARK: - Preview
 
 #Preview {
   OnboardingView(hasCompletedOnboarding: .constant(false))

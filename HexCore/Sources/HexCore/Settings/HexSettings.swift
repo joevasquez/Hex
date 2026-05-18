@@ -74,6 +74,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	/// first-launch onboarding walk-through. Resetting it to `false`
 	/// from Settings → General → "Replay Tutorial" re-enters the flow.
 	public var hasCompletedOnboarding: Bool
+	public var selectedPlan: String?
 	public var cloudSyncEnabled: Bool
 	public var hudPinnedToTop: Bool
 
@@ -125,6 +126,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		customAIModes: [CustomAIMode] = [],
 		inlineEditEnabled: Bool = true,
 		hasCompletedOnboarding: Bool = false,
+		selectedPlan: String? = nil,
 		cloudSyncEnabled: Bool = false,
 		hudPinnedToTop: Bool = false
 	) {
@@ -164,6 +166,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.customAIModes = customAIModes
 		self.inlineEditEnabled = inlineEditEnabled
 		self.hasCompletedOnboarding = hasCompletedOnboarding
+		self.selectedPlan = selectedPlan
 		self.cloudSyncEnabled = cloudSyncEnabled
 		self.hudPinnedToTop = hudPinnedToTop
 		normalizeDoubleTapSettings()
@@ -226,6 +229,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case customAIModes
 	case inlineEditEnabled
 	case hasCompletedOnboarding
+	case selectedPlan
 	case cloudSyncEnabled
 	case hudPinnedToTop
 }
@@ -380,6 +384,7 @@ private enum HexSettingsSchema {
 		SettingsField(.customAIModes, keyPath: \.customAIModes, default: defaults.customAIModes).eraseToAny(),
 		SettingsField(.inlineEditEnabled, keyPath: \.inlineEditEnabled, default: defaults.inlineEditEnabled).eraseToAny(),
 		SettingsField(.hasCompletedOnboarding, keyPath: \.hasCompletedOnboarding, default: defaults.hasCompletedOnboarding).eraseToAny(),
+		SettingsField(.selectedPlan, keyPath: \.selectedPlan, default: defaults.selectedPlan).eraseToAny(),
 		SettingsField(.cloudSyncEnabled, keyPath: \.cloudSyncEnabled, default: defaults.cloudSyncEnabled).eraseToAny(),
 		SettingsField(.hudPinnedToTop, keyPath: \.hudPinnedToTop, default: defaults.hudPinnedToTop).eraseToAny(),
 	]

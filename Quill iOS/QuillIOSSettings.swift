@@ -22,6 +22,7 @@ enum QuillIOSSettingsKey {
   /// `false` from Settings → Productivity → Replay Tutorial to
   /// re-enter the flow.
   static let hasCompletedOnboarding = "quill.hasCompletedOnboarding"
+  static let selectedPlan = "quill.selectedPlan"
 
   /// JSON-encoded `[String]` of `AIProcessingMode.rawValue`s the user
   /// has hidden from the home-screen pill bar. Off (raw transcript) is

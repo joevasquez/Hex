@@ -1394,6 +1394,7 @@ private struct BYOKVerifyStep: View {
         SecureField("Paste your API key", text: $apiKey)
           .textFieldStyle(.plain)
           .font(.system(size: 13, design: .monospaced))
+          .foregroundStyle(OB.ink)
           .padding(12)
           .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -1639,35 +1640,30 @@ private struct FirstDictationStep: View {
       StepDots(step: .firstDictation)
 
       VStack(spacing: 6) {
-        (Text("Try your first ")
+        (Text("How ")
           .font(.system(size: 30, weight: .regular, design: .serif))
           .foregroundStyle(OB.ink)
         + Text("dictation")
           .font(.system(size: 30, weight: .regular, design: .serif).italic())
           .foregroundStyle(OB.purpleDark)
+        + Text(" works")
+          .font(.system(size: 30, weight: .regular, design: .serif))
+          .foregroundStyle(OB.ink)
         )
         .tracking(-0.45)
         .padding(.top, 4)
 
-        Text("Hold the hotkey, say anything, and release. We'll insert it right here.")
+        Text("Hold your recording hotkey, speak naturally, then release. Quill transcribes and pastes the text into whatever app you're using.")
           .font(.system(size: 13.5))
           .foregroundStyle(OB.inkSoft)
           .frame(maxWidth: 460)
           .multilineTextAlignment(.center)
       }
 
-      // Hotkey indicator
-      HStack(spacing: 10) {
-        Text("Hotkey:")
-          .font(.system(size: 12))
-          .foregroundStyle(OB.inkMute)
-        Kbd(text: "\u{2325}")
-        Kbd(text: "Space")
-        Text("(change in Settings)")
-          .font(.system(size: 12))
-          .foregroundStyle(OB.inkMute)
-      }
-      .padding(.top, 6)
+      Text("You can configure your hotkey in Settings after setup.")
+        .font(.system(size: 12))
+        .foregroundStyle(OB.inkMute)
+        .padding(.top, 6)
 
       // HUD mock card
       VStack(spacing: 0) {
@@ -1808,29 +1804,21 @@ private struct DoneStep: View {
         )
         .tracking(-0.88)
 
-        // Description with inline Kbd chips
-        HStack(spacing: 4) {
-          Text("Quill lives in your menu bar. Hold")
-            .font(.system(size: 15))
-            .foregroundStyle(OB.inkSoft)
-          Kbd(text: "\u{2325}")
-          Kbd(text: "Space")
-          Text("anywhere on your Mac to start dictating.")
-            .font(.system(size: 15))
-            .foregroundStyle(OB.inkSoft)
-        }
-        .frame(maxWidth: 420)
-        .multilineTextAlignment(.center)
+        Text("Quill lives in your menu bar. Set a recording hotkey in Settings, then hold it anywhere on your Mac to start dictating.")
+          .font(.system(size: 15))
+          .foregroundStyle(OB.inkSoft)
+          .frame(maxWidth: 420)
+          .multilineTextAlignment(.center)
 
         // Quick-start cards
         HStack(spacing: 8) {
           quickStartCard(
             title: "Try dictation",
-            shortcut: "\u{2325} Space"
+            shortcut: "Hold your hotkey"
           )
           quickStartCard(
             title: "Try Edit",
-            shortcut: "Select text + \u{2325} E"
+            shortcut: "Select text + hotkey"
           )
           quickStartCard(
             title: "Try Act",

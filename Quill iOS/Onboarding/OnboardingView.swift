@@ -980,6 +980,7 @@ private struct BYOKPhoneStep: View {
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .font(.system(.subheadline, design: .monospaced))
+            .foregroundStyle(OB.ink)
             .padding(12)
             .background(
               RoundedRectangle(cornerRadius: 10, style: .continuous)

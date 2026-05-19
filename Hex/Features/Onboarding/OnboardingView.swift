@@ -1391,37 +1391,39 @@ private struct BYOKVerifyStep: View {
             .foregroundStyle(OB.inkSoft)
         }
 
-        SecureField("Paste your API key", text: $apiKey)
-          .textFieldStyle(.plain)
-          .font(.system(size: 13, design: .monospaced))
-          .foregroundStyle(OB.ink)
+        if isVerified {
+          HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+              .foregroundStyle(OB.proGreen)
+            Text("Key saved and verified")
+              .font(.system(size: 13, weight: .semibold))
+              .foregroundStyle(OB.proGreen)
+            Spacer()
+          }
           .padding(12)
           .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-              .fill(isVerified ? Color(red: 0.941, green: 0.980, blue: 0.953) : Color.white)
+              .fill(Color(red: 0.941, green: 0.980, blue: 0.953))
           )
           .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-              .stroke(
-                isVerified ? OB.proGreen : OB.purple,
-                lineWidth: 1.5
-              )
+              .stroke(OB.proGreen.opacity(0.4), lineWidth: 1.5)
           )
-          .overlay(
-            Group {
-              if isVerified {
-                HStack(spacing: 6) {
-                  Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(OB.proGreen)
-                  Text("Verified")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(OB.proGreen)
-                }
-                .padding(.trailing, 14)
-              }
-            },
-            alignment: .trailing
-          )
+        } else {
+          SecureField("Paste your API key", text: $apiKey)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundStyle(OB.ink)
+            .padding(12)
+            .background(
+              RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white)
+            )
+            .overlay(
+              RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(OB.purple, lineWidth: 1.5)
+            )
+        }
 
         if isVerified {
           LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
